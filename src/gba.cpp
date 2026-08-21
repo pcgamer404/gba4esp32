@@ -351,14 +351,24 @@ static void hardware_reset() {
 #define ARM_PREFETCH_NEXT		cpuPrefetch[1] = CPUReadMemoryQuick(bus.armNextPC+4);
 #define THUMB_PREFETCH_NEXT		cpuPrefetch[1] = CPUReadHalfWordQuick(bus.armNextPC+2);
 
+/* A jump into an unmapped region would dereference a NULL map entry and take
+ * the whole console down with LoadProhibited. Catch it AT the jump: dump the
+ * emulated context (the host register dump cannot show it) and reset the
+ * GAME instead of crashing the machine. */
+static void espgba_bad_jump(void);
+#define ESPGBA_JUMP_GUARD \
+    if (!map[(bus.armNextPC >> 24) & 15].address) { espgba_bad_jump(); }
+
 #define ARM_PREFETCH \
   {\
+    ESPGBA_JUMP_GUARD\
     cpuPrefetch[0] = CPUReadMemoryQuick(bus.armNextPC);\
     cpuPrefetch[1] = CPUReadMemoryQuick(bus.armNextPC+4);\
   }
 
 #define THUMB_PREFETCH \
   {\
+    ESPGBA_JUMP_GUARD\
     cpuPrefetch[0] = CPUReadHalfWordQuick(bus.armNextPC);\
     cpuPrefetch[1] = CPUReadHalfWordQuick(bus.armNextPC+2);\
   }
@@ -912,8 +922,57 @@ static inline void m4aSt8(u32 a, u8 v)   { *m4aPtr(a) = v; }
  * [sp+4/0xc/0x10]=locals; return address at [sp+0x40] after the epilogue's
  * add sp,#0x1c + pop {r0-r7} (-> r8-fp, r4-r7) + pop {pc}.
  * Returns false to bail: the caller lets the interpreter run the original. */
+void CPUReset(void); /* below; the bad-jump handler restarts the game */
+static void espgba_bad_jump(void)
+{
+   static int dumps = 0;
+   if (dumps < 5) {
+      dumps++;
+      printf("BADJUMP: pc=0x%08x lr=0x%08x sp=0x%08x r0=0x%08x r1=0x%08x "
+             "r2=0x%08x r3=0x%08x r7=0x%08x arm=%d\n",
+             (unsigned)bus.armNextPC, (unsigned)bus.reg[14].I,
+             (unsigned)bus.reg[13].I, (unsigned)bus.reg[0].I,
+             (unsigned)bus.reg[1].I, (unsigned)bus.reg[2].I,
+             (unsigned)bus.reg[3].I, (unsigned)bus.reg[7].I,
+             armState ? 1 : 0);
+      if ((bus.reg[13].I >> 24) == 3) {
+         u32 s = bus.reg[13].I & 0x7FFC;
+         printf("BADJUMP stack@%08x:", (unsigned)bus.reg[13].I);
+         for (int i = 0; i < 16; i++) {
+            u32 w;
+            memcpy(&w, &internalRAM[(s + i * 4) & 0x7FFC], 4);
+            printf(" %08x", (unsigned)w);
+         }
+         printf("\n");
+      }
+   }
+   printf("BADJUMP: resetting the game (console stays up)\n");
+   CPUReset();
+}
+
 static bool espgba_m4a_native(void)
 {
+   /* One-time on first fire: the code AT the hook must be the exact mixer
+    * this translation was built from (entry: ldrb r3,[r0,#5]; cmp; beq;
+    * adr r1; bx r1 -- byte-identical across the gen-3 titles we cover).
+    * Anything else at that address means the table PC is wrong for this
+    * cart image: disarm forever instead of mixing with garbage state. */
+   {
+      static const u8 kMixerSig[10] = {0x43, 0x79, 0x00, 0x2b, 0x2c,
+                                       0xd0, 0x01, 0xa1, 0x08, 0x47};
+      static u32 verifiedPc = 0;
+      if (verifiedPc != bus.armNextPC) {
+         if (memcmp(m4aPtr(bus.armNextPC), kMixerSig, sizeof(kMixerSig)) != 0) {
+            printf("HLE: code at 0x%08x is not the known mixer -- disarmed\n",
+                   (unsigned)bus.armNextPC);
+            espgba_hle_pc = 1;
+            espgba_hle_pc2 = 1;
+            return false;
+         }
+         verifiedPc = bus.armNextPC;
+      }
+   }
+
    u32 info = bus.reg[0].I;
    u32 sp   = bus.reg[13].I;
    if ((info >> 24) != 3 || (sp >> 24) != 3)
@@ -1174,9 +1233,21 @@ static bool espgba_m4a_native(void)
       }
    }
 
-   /* Epilogue (0x1ef2): unlock the ident, unwind SoundMain's frame. */
-   m4aSt32(m4aLd32(sp + 0x18), 0x68736D53u);
+   /* Epilogue (0x1ef2): unlock the ident, unwind SoundMain's frame.
+    *
+    * Validate the WHOLE frame before touching a single register: the old
+    * code checked the return address only after r4-r11/sp/pc were already
+    * overwritten, so a frame that was not SoundMain's turned the "bail to
+    * interpreter" into a jump through garbage (BX to ~0, LoadProhibited).
+    * Now a bad frame bails with zero state changed and the interpreter
+    * simply runs the original mixer code. */
    u32 base = sp + 0x1C;
+   u32 ret = m4aLd32(base + 0x20);
+   if (!(ret & 1) || ((ret >> 24) != 0x03 && (ret >> 24) != 0x08)) {
+      espgba_hle_bails++;
+      return false; /* not a thumb return into IWRAM/ROM: not our frame */
+   }
+   m4aSt32(m4aLd32(sp + 0x18), 0x68736D53u);
    bus.reg[8].I  = m4aLd32(base + 0x00);
    bus.reg[9].I  = m4aLd32(base + 0x04);
    bus.reg[10].I = m4aLd32(base + 0x08);
@@ -1185,14 +1256,11 @@ static bool espgba_m4a_native(void)
    bus.reg[5].I  = m4aLd32(base + 0x14);
    bus.reg[6].I  = m4aLd32(base + 0x18);
    bus.reg[7].I  = m4aLd32(base + 0x1C);
-   u32 ret = m4aLd32(base + 0x20);
    bus.reg[13].I = base + 0x24;
 
    /* thumb47-style return into SoundMain (thumb) */
    bus.busPrefetchCount = 0;
    bus.reg[15].I = ret & 0xFFFFFFFE;
-   if (!(ret & 1))
-      return false; /* would be an ARM return: never happens, bail hard */
    armState = false;
    bus.armNextPC = bus.reg[15].I;
    bus.reg[15].I += 2;

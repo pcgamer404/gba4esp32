@@ -957,10 +957,11 @@ extern "C" void app_main() {
       }
       printf("BENCH t=%lus emu=%d.%d draw=%d cpu=%d%% wait=%d%% apu=%d%% "
              "w_spr=%d%% w_bg=%d%% w_tile=%d%% w_mix=%d%% cpiT=%d cpiA=%d arm=%d%% DISPCNT=%02x%02x "
-             "bat=%dmV usb=%d\n",
+             "bat=%dmV usb=%d keys=%03x\n",
              (unsigned long)(now * portTICK_PERIOD_MS / 1000), emuCentiFps / 10,
              emuCentiFps % 10, fps, pCpu, pGfx, pApu, pSpr, pBg, pTile, pMix, cpiT, cpiA, armPct,
-             ioMem[1], ioMem[0], batteryMv, usbPowered);
+             ioMem[1], ioMem[0], batteryMv, usbPowered,
+             (unsigned)(osReadKey() & 0x3FF));
     }
   }
 }

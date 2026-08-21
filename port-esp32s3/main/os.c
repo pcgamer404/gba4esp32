@@ -848,7 +848,8 @@ int osPollSerial(void) {
       if (!hdrok) continue;
       uint32_t fsize = (uint32_t)sz[0] | ((uint32_t)sz[1] << 8) |
                        ((uint32_t)sz[2] << 16) | ((uint32_t)sz[3] << 24);
-      if (fsize > 2 * 1024 * 1024) continue;
+      /* Sized for full carts: the host repairs damaged SD ROMs over USB. */
+      if (fsize > 32 * 1024 * 1024) continue;
       /* the art dir may not exist yet on this card */
       mkdir("/sd/art", 0775);
       FILE *pf = fopen(path, "wb");
