@@ -377,10 +377,12 @@ static void lcdInitILI9341(void) {
       0xB6, 3, 0x08, 0x82, 0x27,  // display function control
       0xF2, 1, 0x00,              // 3Gamma off
       0x26, 1, 0x01,              // gamma curve 1
-      0xE0, 15, 0x0F, 0x31, 0x2B, 0x0C, 0x0E, 0x08, 0x4E, 0xF1, 0x37, 0x07,
-      0x10, 0x03, 0x0E, 0x09, 0x00,  // positive gamma
-      0xE1, 15, 0x00, 0x0E, 0x14, 0x03, 0x11, 0x07, 0x31, 0xC1, 0x48, 0x08,
-      0x0F, 0x0C, 0x31, 0x36, 0x0F,  // negative gamma
+      /* Deeper-contrast gamma pair (ILI9341 app-note variant): the Adafruit
+       * default reads slightly washed out on these clone panels. */
+      0xE0, 15, 0x0F, 0x3F, 0x2F, 0x0C, 0x10, 0x0A, 0x53, 0xD5, 0x40, 0x0A,
+      0x13, 0x03, 0x08, 0x03, 0x00,  // positive gamma
+      0xE1, 15, 0x00, 0x00, 0x10, 0x03, 0x0F, 0x05, 0x2C, 0xA2, 0x3F, 0x05,
+      0x0E, 0x0C, 0x37, 0x3C, 0x0F,  // negative gamma
   };
 
   for (size_t i = 0; i < sizeof(seq);) {
@@ -907,26 +909,28 @@ int osPollSerial(void) {
 }
 
 void osSendFrame(const uint8_t *fb, int len) {
-  // Framed so the host can find the payload amid ESP_LOG chatter on the same
-  // UART. Raw RGB565 big-endian (FB is byteswapped for the SPI panel).
-  printf("\n<FB %d>\n", len);
-  fflush(stdout);
+  /* Framed so the host can find the payload amid log chatter. Header and
+   * payload MUST use the same channel: printf goes through the buffered vfs
+   * console while serialWrite hits the driver directly, and the header used
+   * to arrive out of order (host saw pixels with no <FB> marker). */
+  char hdr[24];
+  int n = snprintf(hdr, sizeof(hdr), "\n<FB %d>\n", len);
+  serialWrite(hdr, n);
   serialWrite(fb, len);
-  printf("\n</FB>\n");
-  fflush(stdout);
+  serialWrite("\n</FB>\n", 7);
 }
 
 void osSendFrameStrided(const uint16_t *px, int w, int h, int stridePx) {
-  // Same wire format as osSendFrame (contiguous w*h RGB565-BE), sourced from a
-  // wider buffer -- pix keeps vba-next's 256px stride but the host wants the
-  // visible 240. Sent row by row; UART pace dominates, the seeks are free.
-  printf("\n<FB %d>\n", w * h * 2);
-  fflush(stdout);
+  /* Same wire format as osSendFrame (contiguous w*h RGB565-BE), sourced from
+   * a wider buffer -- pix keeps vba-next's 256px stride but the host wants
+   * the visible 240. Header via the same raw channel as the data. */
+  char hdr[24];
+  int n = snprintf(hdr, sizeof(hdr), "\n<FB %d>\n", w * h * 2);
+  serialWrite(hdr, n);
   for (int y = 0; y < h; y++) {
     serialWrite(px + y * stridePx, w * 2);
   }
-  printf("\n</FB>\n");
-  fflush(stdout);
+  serialWrite("\n</FB>\n", 7);
 }
 
 void osSendAudio(const uint8_t *pcm, int len) {

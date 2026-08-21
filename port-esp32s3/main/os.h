@@ -115,7 +115,11 @@ int osTakeSerialPick(void);
 #define PIN_SPI0_SCLK 12
 #define PIN_SYS_RSTN (-1) /* RST tied to the board reset line */
 #define PIN_LCD_BL 45     /* backlight, HIGH = on */
-#define LCD_SPI_HZ (60000000)
+/* 55MHz nominal: the 260MHz overclock overdrives the SPI clock +8.3%, and at
+ * a 60MHz base that lands past what this ILI9341 accepts -- the panel stops
+ * taking writes ~10s into gameplay (white screen) while the game runs on.
+ * 55 nominal = 59.6 under overclock, inside the proven envelope. */
+#define LCD_SPI_HZ (55000000)
 
 /* SD pins: VERIFIED BY MOUNTING, not from the vendor sketch.
  *

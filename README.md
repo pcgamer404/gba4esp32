@@ -1,5 +1,7 @@
 # esp-gba — a GBA / GB / GBC handheld on an ESP32-S3
 
+![The finished handheld](docs/photos/finished.jpg)
+
 A pocket emulator console built on the Freenove FNK0104 board (ESP32-S3, 2.8"
 ILI9341 320x240, ES8311 audio codec, SD slot, LiPo charging). It plays Game
 Boy Advance titles at ~50 fps with sound, and Game Boy / Game Boy Color
@@ -27,12 +29,34 @@ Forked from [44vba](https://github.com/44670/44vba) (itself a
 - **Physical controls only** in-game: a 2x4 button matrix covers the full
   GBA pad, including L/R via Select-combos.
 
+## Parts list
+
+What one unit is built from:
+
+| Part | Notes |
+|---|---|
+| ESP32-S3 2.8" LCD dev board | "2.8 LCD Display ESP32-S3 240x320 Capacitive Touch" (Freenove FNK0104-class / CYD variant): ESP32-S3 R8, 16 MB flash, 8 MB PSRAM, ILI9341 panel, ES8311 codec, SD slot, TP4054 charger |
+| LiPo battery | 103450 3.7 V 2000 mAh (7.4 Wh) |
+| Speaker | small 8 Ω oval, driven by the board's SC8002B amp |
+| Tactile switches ×8 | D-pad ×4, A, B, Select, Start — on solderable mini breadboards / custom PCB |
+| Hook-up wire + JST connectors | button matrix and battery leads |
+| 3D-printed case | models in [hardware/case/](hardware/case/) |
+| M2/M2.5 heat-set inserts + screws | case assembly |
+
+Custom PCBs and printable case models live under [hardware/](hardware/).
+
+## Build photos
+
+| | |
+|---|---|
+| ![Parts](docs/photos/build-parts.jpg) | ![Assembly](docs/photos/assembly.jpg) |
+
 ## Hardware
 
 | Part | Detail |
 |---|---|
 | Board | Freenove FNK0104 (ESP32-S3, 16 MB quad flash, 8 MB octal PSRAM) |
-| Screen | 2.8" ILI9341, 320x240, SPI at 60 MHz |
+| Screen | 2.8" ILI9341, 320x240, SPI at 55 MHz (59.6 under overclock) |
 | Audio | ES8311 codec + SC8002B amp, I2S |
 | Storage | micro-SD (SDMMC 4-bit) for ROMs, art, and saves |
 | Power | LiPo + on-board TP4054 charger (~100 mA) |
