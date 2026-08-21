@@ -52,7 +52,7 @@ pull-ups, no external resistors needed.
 | Select + Up | toggle the debug/fps overlay |
 | Menu: D-pad | move selection |
 | Menu: A or Start | play |
-| Menu: Select | settings (debug overlay, overclock, native audio) |
+| Menu: Select | settings (volume/mute, debug overlay, overclock, native audio) |
 
 Nothing auto-starts: the console always boots to the picker and waits.
 
@@ -84,8 +84,7 @@ Two things the script handles that a plain `pio run -t upload` gets wrong:
   patches the bootloader image accordingly (details in
   [README-esp-gba.md](README-esp-gba.md)).
 
-For a factory-fresh state (default settings, no touch calibration), also
-erase NVS once:
+For a factory-fresh state (default settings), also erase NVS once:
 
 ```bash
 pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 erase_region 0x9000 0x6000
