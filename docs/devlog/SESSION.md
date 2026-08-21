@@ -551,3 +551,14 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
 - Separate real issue fixed the same night: the 260MHz overclock overdrives
   the LCD SPI clock past this ILI9341's tolerance -- panel white ~10s into
   gameplay while the game runs on. LCD_SPI_HZ 60 -> 55MHz (59.6 under OC).
+
+## 2026-08-21 cont.: mode-0 painter was ALSO white -- both painters unrouted
+
+- The Emerald intro movie (mode 0, BG0-3+OBJ, DISPCNT=1f40) rendered white
+  through mode0RenderLineFast too; FireRed's scenes happened to survive it.
+  Screenshot bisect either side of the single routing change: white -> the
+  full field scene. Both fast painters are now unrouted; slow templates
+  everywhere. Emerald US verified through its entire attract cycle.
+- Cost: heavy intro scenes ~22-26 fps stock (+OC on the glass now that the
+  LCD runs 55MHz). Correctness ships; painters may return only with
+  per-scene SHOT verification.

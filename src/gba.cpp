@@ -12637,14 +12637,11 @@ static void ESPGBA_HOT mode1RenderLineFast (void)
 template<int renderer_idx>
 inline renderfunc_t GetRenderFunc(int mode, int type) {
 	switch((mode << 4) | type) {
-#if THREADED_RENDERER
-		/* Painter's-algorithm fast path for the no-effects case; the ring
-		 * worker always renders through instance 0. */
-		case 0x00: return renderer_idx == 0 ? mode0RenderLineFast
-		                                    : mode0RenderLine<renderer_idx>;
-#else
+		/* The fast painters (mode 0 and 1) are UNROUTED: the Emerald intro
+		 * renders white through them (screenshot bisect, framebuffer level).
+		 * Slow templates are upstream-proven. Re-route only after per-scene
+		 * SHOT verification. */
 		case 0x00: return mode0RenderLine<renderer_idx>;
-#endif
 		case 0x01: return mode0RenderLineNoWindow<renderer_idx>;
 		case 0x02: return mode0RenderLineAll<renderer_idx>;
 		/* mode1RenderLineFast is DISABLED pending visual verification: the
