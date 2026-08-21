@@ -790,6 +790,7 @@ extern "C" void app_main() {
           nvs_commit(uih);
           nvs_close(uih);
         }
+        clkFlashRestore(); /* overclock comes back if it was on */
         if (!showFps) {
           memset(dbgStrip, 0, sizeof(dbgStrip));
           lcdBlitRegion((uint8_t *)dbgStrip, GBA_X_OFF, GBA_Y_OFF - 12, 240,

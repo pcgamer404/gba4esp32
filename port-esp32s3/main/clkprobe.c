@@ -237,8 +237,9 @@ bool clkAt320(void) { return s_at320; }
 
 /* Drop back to stock BEFORE any flash/NVS write. The overdriven BBPLL also
  * overdrives the SPI flash clock (+8%), and writes at that speed have
- * corrupted the cart image in testing. Stays at stock afterwards; the next
- * game start re-engages the hold if auto mode is on. */
+ * corrupted the cart image in testing. Pair with clkFlashRestore() after the
+ * write to re-engage the hold if the auto setting is still on. */
+static bool s_guardDropped = false;
 void clkFlashGuard(void) {
   if (!s_at320) {
     return;
@@ -246,7 +247,18 @@ void clkFlashGuard(void) {
   revertTo240();
   s_at320 = false;
   s_holdMagic = 0;
+  s_guardDropped = true;
   printf("CLK: dropped to stock 240 for a flash write\n");
+}
+
+void clkFlashRestore(void) {
+  if (!s_guardDropped) {
+    return;
+  }
+  s_guardDropped = false;
+  if (clkAutoGet()) {
+    clkHoldNow();
+  }
 }
 
 /* Persistent "switch to 278 after the game starts" flag. Unlike the one-shot
@@ -254,7 +266,7 @@ void clkFlashGuard(void) {
  * at stock 240, which is the order proven to work. */
 bool clkAutoGet(void) {
   nvs_handle_t h;
-  uint8_t v = 0;
+  uint8_t v = 1; /* overclock ON by default; flash writes drop to stock */
   if (nvs_open("clk", NVS_READONLY, &h) == ESP_OK) {
     nvs_get_u8(h, "auto278", &v);
     nvs_close(h);
@@ -272,6 +284,7 @@ void clkAutoSet(bool on) {
   }
   printf("CLK: auto-278 %s (takes effect when a game starts)\n",
          on ? "ON" : "OFF");
+  clkFlashRestore(); /* back to the hold if it was dropped and still wanted */
 }
 
 /* Mid-game switch to the proven 278 MHz point (VCO x14), no reboot: every

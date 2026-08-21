@@ -93,12 +93,13 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 
 
 ## Performance notes
 
-Stock 240 MHz with the native audio mixer (default on) runs gen-3 Pokémon at
-~50 fps. The settings screen offers a 260 MHz overclock for a few more fps,
-**off by default**: it overdrives the shared PLL, which also pushes the
-flash/PSRAM clocks ~8% out of spec — reads are stable, but flash writes
-under overclock have corrupted the cart image in testing. Leave it off
-unless you are experimenting.
+The native audio mixer (default on) plus a 260 MHz overclock (default on,
+engages ~10 s into gameplay) runs gen-3 Pokémon at ~55 fps. The overclock
+overdrives the shared PLL, which also pushes the flash clock ~8% out of
+spec — safe for reads, but not for writes — so the firmware automatically
+drops to stock around every flash/NVS write (game copies, settings saves)
+and re-engages afterwards. It can be turned off in the settings screen;
+all settings persist in NVS across power cycles.
 
 A serial control channel (1.5 Mbaud on the USB port, `0xA5`-framed commands
 in `port-esp32s3/main/os.h`) supports scripted picks, benchmarks, screenshots,
