@@ -269,6 +269,33 @@ static void lcdReadPixels(int x, int y, int n, uint8_t *rgb /* 3*n bytes */) {
   memcpy(rgb, rx + 1, 3 * n);
 }
 
+/* Stream the ENTIRE panel's frame memory back over serial in the SHOT wire
+ * format (<FB len> + RGB565-BE). The read clock is ~6.6MHz so this takes a
+ * couple of seconds -- diagnosis only. Answers "what is ON THE GLASS" without
+ * a camera: every white-screen hunt tonight needed exactly this. */
+void lcdPanelDump(void) {
+  static uint8_t row[3 * 16];
+  char hdr[24];
+  int n = snprintf(hdr, sizeof(hdr), "\n<FB %d>\n", LCD_W * LCD_H * 2);
+  extern void osSerialWriteRaw(const void *buf, int len);
+  osSerialWriteRaw(hdr, n);
+  for (int y = 0; y < LCD_H; y++) {
+    for (int x = 0; x < LCD_W; x += 16) {
+      lcdReadPixels(x, y, 16, row);
+      uint8_t out[32];
+      for (int i = 0; i < 16; i++) {
+        /* panel returns 6-6-6 as 3 bytes; pack back to 565 big-endian */
+        uint16_t v = ((row[3*i] >> 3) << 11) | ((row[3*i+1] >> 2) << 5)
+                     | (row[3*i+2] >> 3);
+        out[2*i] = v >> 8;
+        out[2*i+1] = v & 0xFF;
+      }
+      osSerialWriteRaw(out, 32);
+    }
+  }
+  osSerialWriteRaw("\n</FB>\n", 7);
+}
+
 /* Sample a row of the panel's frame memory and report how much of it is
  * non-black. Lets the running game be verified end to end -- emulator ->
  * framebuffer -> SPI -> panel RAM -- without anyone looking at the screen. */
@@ -733,11 +760,15 @@ static int serialRead1(uint8_t *b, TickType_t ticks) {
   return 0;
 }
 
+void osSerialWriteRaw(const void *buf, int len);
+
 static void serialWrite(const void *buf, int len) {
   if (usbSerialUp) {
     usb_serial_jtag_write_bytes((const char *)buf, len, pdMS_TO_TICKS(2000));
   } /* else: 278-hold, output dropped -- UART0 pins belong to the buttons */
 }
+
+void osSerialWriteRaw(const void *buf, int len) { serialWrite(buf, len); }
 
 int osPollSerial(void) {
   uint8_t b;
@@ -816,6 +847,8 @@ int osPollSerial(void) {
       extern uint32_t espgba_probe_pc, espgba_probe_hits;
       printf("PROBE: pc=0x%08x hits=%u\n", (unsigned)espgba_probe_pc,
              (unsigned)espgba_probe_hits);
+    } else if (cmd == 0x12) { /* dump the PANEL's own frame memory */
+      req |= 0x2000; /* OS_REQ_PANELDUMP */
     } else if (cmd == 0x11) { /* ls: list /sd/roms and /sd/art */
       const char *dirs[2] = {"/sd/roms", "/sd/art"};
       for (int di = 0; di < 2; di++) {

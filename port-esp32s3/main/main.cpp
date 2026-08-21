@@ -891,6 +891,9 @@ extern "C" void app_main() {
     if (req & OS_REQ_SHOT) {
       osSendFrameStrided(pix, 240, 160, PIX_STRIDE);
     }
+    if (req & OS_REQ_PANELDUMP) {
+      lcdPanelDump();
+    }
     if (frameCount % 60 == 0) {
       /* Benchmark line.
        *

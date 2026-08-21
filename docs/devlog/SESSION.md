@@ -562,3 +562,19 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
 - Cost: heavy intro scenes ~22-26 fps stock (+OC on the glass now that the
   LCD runs 55MHz). Correctness ships; painters may return only with
   per-scene SHOT verification.
+
+## 2026-08-21 late: THREADED RENDERER unshipped -- the fade/brightness bug
+
+- Panel-readback tooling (OS_CMD_PANELDUMP 0x12, reads the LCD's own GRAM)
+  ended all screen blindness. With it: Emerald's fade-to-white sticks
+  through the threaded ring (post-fade screens ghost through a permanent
+  white wash; copyright text faintly visible), while the SYNCHRONOUS
+  renderer renders every phase correctly (Groudon/Kyogre scenes, FireRed's
+  Charizard title -- never seen before tonight).
+- THREADED_RENDERER=0 shipped. Honest fps: FireRed title 17, heavy intro
+  scenes ~15, GB locked 60. The threaded ring + both fast painters are the
+  documented speed roadmap, each gated on a per-scene screenshot audit.
+- LESSON, in stone: every renderer optimization in this project that
+  shipped on fps numbers alone was broken in ways benches cannot see.
+  SHOT + PANELDUMP now make seeing cheap; nothing renders "fast" again
+  without rendering RIGHT first.

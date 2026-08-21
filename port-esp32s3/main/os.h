@@ -10,7 +10,8 @@ void lcdWaitFB(void); /* reclaim the queued blit before reusing the buffer */
 void lcdBlitRegion(uint8_t *buf, int x, int y, int w, int h);      /* blocking */
 void lcdBlitRegionAsync(uint8_t *buf, int x, int y, int w, int h); /* queued; CS released by lcdWaitFB */
 void lcdSelfTest(void);
-void lcdProbeRow(int x, int y, int n); /* read panel RAM back */            /* read back panel ID/MADCTL/pixel format */
+void lcdProbeRow(int x, int y, int n);
+void lcdPanelDump(void); /* stream whole panel RAM in SHOT format */ /* read panel RAM back */            /* read back panel ID/MADCTL/pixel format */
 void lcdFillScreen(uint16_t colour); /* full-panel fill, sized from LCD_W/LCD_H */
 void delayMS(int ms);
 void osInit();
@@ -38,6 +39,7 @@ uint32_t osReadKey();
 #define OS_CMD_IDLE 0x0B /* + 4 bytes LE: idle-loop PC to skip (0 = clear) */
 #define OS_CMD_PEEK 0x0C /* + 4 bytes LE addr + 2 bytes LE len: hex dump of
                           * emulated memory (IWRAM/EWRAM/ROM) over serial */
+#define OS_CMD_PANELDUMP 0x12 /* stream the panel's frame memory back (slow) */
 #define OS_CMD_HLE 0x0D /* + 1 byte: 0/1 native m4a mixer (gba.cpp HLE) */
 
 /* osPollSerial() return bits */
@@ -54,6 +56,7 @@ uint32_t osReadKey();
 #define OS_REQ_PEEK 0x400
 #define OS_REQ_HLE_ON 0x800
 #define OS_REQ_HLE_OFF 0x1000
+#define OS_REQ_PANELDUMP 0x2000
 /* Set alongside OS_REQ_IDLE; the PC that arrived with the command. */
 uint32_t osTakeIdlePc(void);
 /* Battery pack voltage in mV (ADC1_CH8 behind a 1:2 divider), -1 if the ADC

@@ -21,4 +21,4 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     # Pokemon gen 3 (the watch port runs them).
     -DTILED_RENDERING
     -DUSE_TWEAKS=1
-    -DTHREADED_RENDERER=1)
+    -DTHREADED_RENDERER=0)

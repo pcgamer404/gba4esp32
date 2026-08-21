@@ -4,8 +4,8 @@
 
 A pocket emulator console built on the Freenove FNK0104 board (ESP32-S3, 2.8"
 ILI9341 320x240, ES8311 audio codec, SD slot, LiPo charging). It plays Game
-Boy Advance titles at ~50 fps with sound, and Game Boy / Game Boy Color
-titles at a locked 60 fps.
+Boy Advance titles with sound and correct rendering, and Game Boy /
+Game Boy Color titles at a locked 60 fps.
 
 Forked from [44vba](https://github.com/44670/44vba) (itself a
 [vba-next](https://github.com/libretro/vba-next) fork); GB/GBC support is
@@ -14,9 +14,9 @@ Forked from [44vba](https://github.com/44670/44vba) (itself a
 
 ## Features
 
-- **GBA** via vba-next with a threaded scanline renderer, a native (HLE)
-  m4a audio mixer, and per-game idle-loop skip — Pokémon gen-3 runs ~50 fps
-  with audio at stock clocks.
+- **GBA** via vba-next with a native (HLE) m4a audio mixer and per-game
+  idle-loop skip. Rendering is verified-correct (screenshot-audited);
+  15-35 fps depending on scene, with the speed work ongoing.
 - **GB / GBC** via gnuboy at a locked 60 fps, scaled 1.5x to 240x216.
 - **Sound** through the board's ES8311 codec + speaker, rate-matched to the
   emulator's real speed so audio never crackles or drifts.
@@ -117,7 +117,10 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 
 ## Performance notes
 
 The native audio mixer (default on) plus a 260 MHz overclock (default on,
-engages ~10 s into gameplay) runs gen-3 Pokémon at ~55 fps. The overclock
+engages ~10 s into gameplay) run gen-3 Pokémon at 15-35 fps depending on
+scene, with rendering verified correct frame-by-frame. Faster renderer
+paths exist in-tree but are unrouted until they pass the same
+screenshot audit that caught them rendering white. The overclock
 overdrives the shared PLL, which also pushes the flash clock ~8% out of
 spec — safe for reads, but not for writes — so the firmware automatically
 drops to stock around every flash/NVS write (game copies, settings saves)
