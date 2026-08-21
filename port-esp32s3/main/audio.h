@@ -30,12 +30,9 @@ void audioAmpEnable(bool on);
  * pllNum/pllDen fold in PLL-overdrive compensation (557/480 held, else 1/1
  * or 480/480). Call once a second with the measured emu speed in deci-fps. */
 void audioMatchRate(int emuCentiFps, int pllNum, int pllDen);
-void audioTestTone(int ms, int hz);
-void audioTestTonePolarity(int ms, int hz);
 /* Play a tone and listen through the board's own mic: analog-path verdict. */
 void audioDumpRegs(void);
 /* Count edges on the I2S pads while a tone plays: electrical output proof. */
-void audioProbePins(void);
 
 #ifdef __cplusplus
 }

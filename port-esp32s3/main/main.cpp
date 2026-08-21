@@ -301,8 +301,6 @@ extern "C" void app_main() {
   audioI2cScan();
   audioInit(47872);  /* matches the rate the emulator core actually produces */
   audioDumpRegs();
-  audioTestTonePolarity(900, 440);
-  audioDumpRegs();
   /* User volume (settings menu, NVS "ui"/"vol"); 0 = mute. */
   {
     nvs_handle_t uih;

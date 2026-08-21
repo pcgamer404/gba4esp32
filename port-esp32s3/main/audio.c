@@ -238,70 +238,6 @@ void audioWrite(const int16_t *pcm, int samples) {
   i2s_write(I2S_PORT, pcm, (size_t)samples * sizeof(int16_t), &wrote, 0);
 }
 
-/* Play a 440Hz sine straight to the codec.
- *
- * Removes the emulator from the question entirely: if this is audible the whole
- * chain (I2C config, MCLK, I2S, amp enable, speaker) is good and any silence
- * during a game is a supply-rate problem, not a wiring one. If it is silent the
- * fault is in the codec setup.
- */
-/* The SC8002B's SHUTDOWN pin (schematic U6 pin 1) carries a 10K pull-up to
- * 3V3, so its idle state is "high". Whether high means enabled or shut down is
- * not something to guess at -- play the same tone at both polarities and let
- * the ear decide. */
-void audioTestTonePolarity(int ms, int hz) {
-  audioSetVolume(AUDIO_MAX_VOLUME_PCT);  /* the mic test needs all the SNR it can get */
-  ESP_LOGI(TAG, "=== tone A: SHUTDOWN HIGH (amp muted) ===");
-  gpio_set_level(PIN_AUDIO_EN, 1);
-  audioTestTone(ms, hz);
-  vTaskDelay(pdMS_TO_TICKS(700));
-  ESP_LOGI(TAG, "=== tone B: SHUTDOWN LOW (amp on) ===");
-  gpio_set_level(PIN_AUDIO_EN, 0);
-  vTaskDelay(pdMS_TO_TICKS(300)); /* bypass cap charge */
-  audioTestTone(ms, hz);
-  ESP_LOGI(TAG, "=== B should be the audible one ===");
-  audioSetVolume(AUDIO_DEFAULT_VOLUME_PCT);
-}
-
-void audioTestTone(int ms, int hz) {
-  if (!codecReady) {
-    ESP_LOGW(TAG, "test tone skipped: codec not initialised");
-    return;
-  }
-  /* 480 samples = 10ms at 48kHz, so any hz that is a multiple of 100 loops
-   * seamlessly. The old version looped ONE cycle over 256 samples, which made
-   * every "440Hz" test actually a 187Hz rumble a tiny speaker can barely
-   * reproduce -- and nearly killed the microphone-based polarity test. */
-  static int16_t wave[480 * 2];
-  int rate = 48000;
-  for (int i = 0; i < 480; i++) {
-    int v = (int)(10000.0f * sinf(2.0f * 3.14159265f * hz * i / (float)rate));
-    wave[i * 2] = (int16_t)v;
-    wave[i * 2 + 1] = (int16_t)v;
-  }
-
-  int total = (rate * ms) / 1000;
-  int sent = 0;
-  ESP_LOGI(TAG, "test tone: %dms @ %dHz, volume %d%%", ms, hz,
-           AUDIO_DEFAULT_VOLUME_PCT);
-  bool probed = false;
-  while (sent < total) {
-    size_t wrote = 0;
-    i2s_write(I2S_PORT, wave, sizeof(wave), &wrote, pdMS_TO_TICKS(200));
-    if (wrote == 0) {
-      ESP_LOGE(TAG, "i2s_write wrote nothing -- I2S is not draining");
-      break;
-    }
-    sent += (int)(wrote / 4);
-    if (!probed && sent > total / 4) {
-      probed = true; /* DMA is saturated: lines should be toggling NOW */
-      audioProbePins();
-    }
-  }
-  ESP_LOGI(TAG, "test tone done, %d of %d frames sent", sent, total);
-}
-
-/* Dump the registers that decide whether sound comes out at all. */
 void audioDumpRegs(void) {
   if (!audioI2cProbe(ES8311_ADDR)) {
     ESP_LOGE(TAG, "ES8311 not responding");
@@ -324,26 +260,7 @@ void audioDumpRegs(void) {
  * the I2S peripheral and sabotage the measurement) and sample the raw
  * GPIO_IN register. A driven clock/data line shows thousands of edges over
  * the window, a dead one ~0. Call while a tone is playing. */
-void audioProbePins(void) {
-  const int pins[4] = {PIN_I2S_MCK, PIN_I2S_SCK, PIN_I2S_LRC, PIN_I2S_DO};
-  const char *names[4] = {"MCK", "SCK", "LRC", "DO"};
-  for (int i = 0; i < 4; i++) {
-    PIN_INPUT_ENABLE(GPIO_PIN_MUX_REG[pins[i]]);
-  }
-  int edges[4] = {0};
-  uint32_t last = REG_READ(GPIO_IN_REG); /* pins 4/5/7/8 all live here */
-  for (int n = 0; n < 200000; n++) {
-    uint32_t now = REG_READ(GPIO_IN_REG);
-    uint32_t diff = now ^ last;
-    for (int i = 0; i < 4; i++) {
-      if (diff & (1u << pins[i])) edges[i]++;
-    }
-    last = now;
-  }
-  ESP_LOGI(TAG, "pin edges over 200k samples: %s(%d)=%d %s(%d)=%d %s(%d)=%d %s(%d)=%d",
-           names[0], pins[0], edges[0], names[1], pins[1], edges[1],
-           names[2], pins[2], edges[2], names[3], pins[3], edges[3]);
-}
+
 
 void audioAmpEnable(bool on) {
   gpio_set_level(PIN_AUDIO_EN, on ? 0 : 1); /* SC8002B SHUTDOWN: LOW = on */
