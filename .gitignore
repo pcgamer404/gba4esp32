@@ -31,3 +31,7 @@ build
 port-watchos
 Release
 *.bak
+# PlatformIO build output
+.pio/
+sdkconfig.old
+__pycache__/
