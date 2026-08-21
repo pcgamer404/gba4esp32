@@ -163,7 +163,10 @@ void menuProgress(const char *label, int pct) {
   menuRender(drawProgress);
 }
 
-/* Returns: 0 = nothing, 1 = short press, 2 = long press. Blocks while held. */
+/* Returns: 0 = nothing, 1 = short press, 2 = long press (play/toggle),
+ * 3 = very long press >=2.5s (settings). Blocks while held. A unit without
+ * the button matrix is driven entirely from this one button. */
+#define VERY_LONG_PRESS_MS 2500
 static int buttonPoll(void) {
   if (gpio_get_level(BOOT_BTN) != 0) {
     return 0;
@@ -176,6 +179,7 @@ static int buttonPoll(void) {
   if (held < 30) {
     return 0;  // debounce
   }
+  if (held >= VERY_LONG_PRESS_MS) return 3;
   return held >= LONG_PRESS_MS ? 2 : 1;
 }
 
@@ -376,6 +380,23 @@ static void menuSettings(void) {
   menuRender(drawSettings);
   uint32_t lastKeys = 0xFFFFFFFF; /* force release before first press */
   while (1) {
+    /* BOOT button, for units without the matrix: short = next row,
+     * long = toggle (or adjust volume up; it wraps), on Back = leave. */
+    int p = buttonPoll();
+    if (p == 1) {
+      gSetSel = (gSetSel + 1) % SET_ROWS;
+      menuRender(drawSettings);
+    } else if (p >= 2) {
+      if (gSetSel == 4) return;
+      if (gSetSel == 3) {
+        settingsVolumeStep(+1);
+        if (settingsGet("vol", AUDIO_DEFAULT_VOLUME_PCT) >= 100)
+          settingsSet("vol", 0); /* wrap to mute so every level is reachable */
+      } else {
+        settingsToggle(gSetSel);
+      }
+      menuRender(drawSettings);
+    }
     uint32_t k = osReadKey();
     uint32_t pressed = k & ~lastKeys;
     lastKeys = k;
@@ -484,26 +505,30 @@ static void drawLibrary(void) {
   }
   menuText(3, MENU_H - 10, foot, roms[sel].fits ? 0x7BEF : 0xF800);
 
-  /* Battery + charge state, top-right corner of the title bar. "CHG" in
-   * green while a USB host is powering the board, else the pack voltage
-   * (red under 3.5V = time to charge). */
+  /* Battery + charge state, top-right corner of the title bar: the same
+   * glyph as the in-game debug strip -- outline + 0-4 bars, and a yellow
+   * "+" while a USB host is powering the board. Red outline under 3.5V. */
   {
     int mv = osBatteryMv();
     int chg = osUsbPresent();
-    if (mv > 9990) mv = 9990;   /* bound %d so snprintf provably fits */
-    if (mv < 0) mv = 0;
-    char batt[16];
-    if (chg) {
-      snprintf(batt, sizeof(batt), "CHG %d.%02dV", mv / 1000,
-               (mv % 1000) / 10);
-    } else if (mv > 0) {
-      snprintf(batt, sizeof(batt), "%d.%02dV", mv / 1000, (mv % 1000) / 10);
-    } else {
-      batt[0] = 0;
+    int bars = mv < 0 ? 0
+               : mv > 4400 ? 4
+               : mv <= 3300 ? 0
+               : (mv - 3300) * 4 / 900 + 1;
+    if (bars > 4) bars = 4;
+    uint16_t col = mv >= 0 && mv < 3500 && !chg ? 0xF800 : 0x07E0;
+    int bx = MENU_W - 26;    /* 20px body + 2px tip inside the 11px bar */
+    /* outline */
+    for (int x = 0; x < 20; x++) { menuPix(bx + x, 2, col); menuPix(bx + x, 8, col); }
+    for (int y = 2; y <= 8; y++) { menuPix(bx, y, col); menuPix(bx + 19, y, col); }
+    menuBar(bx + 20, 4, 2, 3, col);   /* tip */
+    for (int b = 0; b < bars; b++) {
+      menuBar(bx + 2 + b * 4, 4, 3, 3, col);
     }
-    int w = (int)strlen(batt) * 8;
-    menuText(MENU_W - 4 - w, 2, batt,
-             chg ? 0x07E0 : mv < 3500 ? 0xF800 : 0xFFFF);
+    if (chg) { /* "+" bolt left of the battery */
+      for (int y = 2; y <= 8; y++) menuPix(bx - 5, y, 0xFFE0);
+      for (int x = -8; x <= -2; x++) menuPix(bx + x, 5, 0xFFE0);
+    }
   }
 
   /* Last so nothing overdraws it. */
@@ -600,6 +625,10 @@ int menuChooseRom(const sdRomEntry *roms, int n, const char *flashed) {
       if (roms[sel].fits) {
         return sel;
       }
+    } else if (p == 3) { /* very long: settings, for units without a matrix */
+      gaugeMs = 0;
+      menuSettings();
+      drawList(roms, n, sel, flashed);
     }
     vTaskDelay(pdMS_TO_TICKS(20));
   }
