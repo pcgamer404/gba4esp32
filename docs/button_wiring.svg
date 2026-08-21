@@ -1,0 +1,88 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 980 640" font-family="monospace">
+  <rect width="980" height="640" fill="#101418"/>
+  <text x="20" y="34" fill="#7fd4ff" font-size="22">FNK0104B button matrix -- 8 buttons on the 6 free header pins</text>
+  <text x="20" y="56" fill="#8a94a0" font-size="13">2 rows x 4 columns. Each button bridges its ROW wire to its COLUMN wire. No other parts required.</text>
+
+  <!-- headers -->
+  <g font-size="13">
+    <rect x="20" y="90" width="200" height="150" rx="6" fill="#1b2430" stroke="#3a4a5c"/>
+    <text x="35" y="112" fill="#ffd479">P3 "Expanded IO" header</text>
+    <text x="35" y="136" fill="#c8d2dc">+5V   (do not use)</text>
+    <text x="35" y="156" fill="#7fff9e">IO2   -> ROW wire R1</text>
+    <text x="35" y="176" fill="#7fff9e">IO3   -> ROW wire R2</text>
+    <text x="35" y="196" fill="#ff9e7f">IO14  -> COL wire C1</text>
+    <text x="35" y="216" fill="#ff9e7f">IO21  -> COL wire C2</text>
+    <text x="35" y="234" fill="#c8d2dc">GND   (do not use)</text>
+
+    <rect x="20" y="260" width="200" height="112" rx="6" fill="#1b2430" stroke="#3a4a5c"/>
+    <text x="35" y="282" fill="#ffd479">P2 "UART" header</text>
+    <text x="35" y="306" fill="#c8d2dc">+5V   (do not use)</text>
+    <text x="35" y="326" fill="#ff9e7f">TXD0  -> COL wire C3 (IO43)</text>
+    <text x="35" y="346" fill="#ff9e7f">RXD0  -> COL wire C4 (IO44)</text>
+    <text x="35" y="364" fill="#c8d2dc">GND   (do not use)</text>
+  </g>
+
+  <!-- matrix -->
+  <!-- column verticals -->
+  <g stroke="#ff9e7f" stroke-width="3" fill="none">
+    <line x1="420" y1="120" x2="420" y2="470"/>
+    <line x1="560" y1="120" x2="560" y2="470"/>
+    <line x1="700" y1="120" x2="700" y2="470"/>
+    <line x1="840" y1="120" x2="840" y2="470"/>
+  </g>
+  <g fill="#ff9e7f" font-size="14">
+    <text x="398" y="110">C1=IO14</text>
+    <text x="538" y="110">C2=IO21</text>
+    <text x="678" y="110">C3=TXD0</text>
+    <text x="818" y="110">C4=RXD0</text>
+  </g>
+  <!-- row horizontals -->
+  <g stroke="#7fff9e" stroke-width="3" fill="none">
+    <line x1="300" y1="200" x2="900" y2="200"/>
+    <line x1="300" y1="380" x2="900" y2="380"/>
+  </g>
+  <g fill="#7fff9e" font-size="14">
+    <text x="300" y="190">R1 = IO2  (D-pad row)</text>
+    <text x="300" y="370">R2 = IO3  (action row)</text>
+  </g>
+
+  <!-- buttons: circle at each crossing, legs to row+col -->
+  <g font-size="15" text-anchor="middle">
+    <!-- row 1 -->
+    <g>
+      <circle cx="420" cy="200" r="26" fill="#223042" stroke="#e8eef4" stroke-width="2"/>
+      <text x="420" y="206" fill="#e8eef4">UP</text>
+      <circle cx="560" cy="200" r="26" fill="#223042" stroke="#e8eef4" stroke-width="2"/>
+      <text x="560" y="206" fill="#e8eef4">DOWN</text>
+      <circle cx="700" cy="200" r="26" fill="#223042" stroke="#e8eef4" stroke-width="2"/>
+      <text x="700" y="206" fill="#e8eef4">LEFT</text>
+      <circle cx="840" cy="200" r="26" fill="#223042" stroke="#e8eef4" stroke-width="2"/>
+      <text x="840" y="206" fill="#e8eef4">RIGHT</text>
+    </g>
+    <!-- row 2 -->
+    <g>
+      <circle cx="420" cy="380" r="26" fill="#2c2233" stroke="#e8eef4" stroke-width="2"/>
+      <text x="420" y="386" fill="#e8eef4">A</text>
+      <circle cx="560" cy="380" r="26" fill="#2c2233" stroke="#e8eef4" stroke-width="2"/>
+      <text x="560" y="386" fill="#e8eef4">B</text>
+      <circle cx="700" cy="380" r="26" fill="#2c2233" stroke="#e8eef4" stroke-width="2"/>
+      <text x="700" y="386" fill="#e8eef4">SELECT</text>
+      <circle cx="840" cy="380" r="26" fill="#2c2233" stroke="#e8eef4" stroke-width="2"/>
+      <text x="840" y="386" fill="#e8eef4">START</text>
+    </g>
+  </g>
+
+  <!-- how a button connects -->
+  <g font-size="13" fill="#8a94a0">
+    <text x="300" y="480">Each button is a plain 2-leg tact switch sitting ON a crossing:</text>
+    <text x="300" y="500">leg 1 -> the green ROW wire, leg 2 -> the orange COLUMN wire.</text>
+    <text x="300" y="520">Example: the B button connects IO3 to IO21. Nothing goes to GND or +5V.</text>
+  </g>
+
+  <g font-size="13">
+    <text x="20" y="560" fill="#ffd479">Notes</text>
+    <text x="20" y="580" fill="#8a94a0">* Optional: a 1N4148 diode in series with each button (band toward the row) removes all ghosting.</text>
+    <text x="20" y="598" fill="#8a94a0">  Without diodes the only ghost case is a D-pad DIAGONAL held together with A/B -- gen-3 Pokemon never</text>
+    <text x="20" y="616" fill="#8a94a0">  moves diagonally, so bare switches are fine. L/R are not wired; firmware maps them later (touch corners).</text>
+  </g>
+</svg>

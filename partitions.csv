@@ -1,0 +1,14 @@
+# Name,   Type, SubType, Offset,   Size, Flags
+#
+# 16MB flash. The app is only ~655KB, so the old 4M app partition was wasting
+# 2M that the rom partition can use: 11.94MB -> 13.94MB, which covers every GBA
+# cart except the 16MB ones.
+#
+# 16MB carts cannot be made to fit, and this is arithmetic rather than tuning:
+# even a 1MB app leaves at most 14.94MB, while Emerald needs 15.25MB and FireRed
+# 15.87MB *after* trimming their padding. Those two require an SD-paging reader,
+# not a bigger partition.
+nvs,      data, nvs,     0x9000,   0x6000,
+phy_init, data, phy,     0xf000,   0x1000,
+factory,  app,  factory, 0x10000,  2M,
+rom,      0x40, 0,       0x210000, 0xDF0000,

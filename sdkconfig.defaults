@@ -1,0 +1,73 @@
+# Derived from upstream port-esp32s3/sdkconfig, adjusted for this board.
+# Upstream targeted an 8MB-flash N8R8; this board has 16MB flash.
+
+CONFIG_IDF_TARGET="esp32s3"
+
+# --- flash: 16MB, quad per eFuse ("Flash type set in eFuse: quad") ---
+# DIO, not QIO. With QIO the ROM loader misreads the bootloader image
+# (one bogus 0x1784 segment, then ets_loader.c:78 and a watchdog reset --
+# it never reaches "entry"). Upstream's sdkconfig was self-contradictory:
+# CONFIG_ESPTOOLPY_FLASHMODE_QIO=y alongside CONFIG_ESPTOOLPY_FLASHMODE="dio".
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# --- custom partition table (4M app + 11M rom) ---
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- CPU ---
+CONFIG_ESP32S3_DEFAULT_CPU_FREQ_240=y
+
+# --- octal PSRAM (R8 die). Kept at 40MHz to match the upstream config that
+#     was reported working; 80MHz octal is a later optimisation, not a
+#     starting point. ---
+CONFIG_ESP32S3_SPIRAM_SUPPORT=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_TYPE_AUTO=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_BOOT_INIT=y
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+CONFIG_SPIRAM_MALLOC_RESERVE_INTERNAL=32768
+CONFIG_SPIRAM_ALLOW_STACK_EXTERNAL_MEMORY=y
+
+# --- caches: upstream values, they matter a lot for emulation throughput ---
+CONFIG_ESP32S3_INSTRUCTION_CACHE_32KB=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_8WAYS=y
+CONFIG_ESP32S3_INSTRUCTION_CACHE_LINE_32B=y
+CONFIG_ESP32S3_DATA_CACHE_64KB=y
+CONFIG_ESP32S3_DATA_CACHE_8WAYS=y
+CONFIG_ESP32S3_DATA_CACHE_LINE_64B=y
+
+# --- build for speed ---
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- runtime ---
+CONFIG_FREERTOS_HZ=100
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+
+# A framebuffer dump is 240*160*2 = 76800 bytes. At 115200 baud that is ~7s per
+# screenshot; at 921600 it is under a second. The CH340 handles 921600 fine
+# (esptool already writes the 8MB ROM at that rate).
+#
+# Console on the native USB-Serial-JTAG: GPIO 43/44 (old UART console pins,
+# wired to nothing on this board) now serve as button-matrix columns, so the
+# UART console is gone entirely. All logs and the control channel share USB.
+CONFIG_ESP_CONSOLE_USB_SERIAL_JTAG=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# app_main() runs the emulator loop forever and never feeds the watchdog.
+CONFIG_ESP_TASK_WDT=n
+
+# --- perf: no assertions in the hot path ---
+CONFIG_COMPILER_OPTIMIZATION_ASSERTIONS_DISABLE=y
+CONFIG_HAL_ASSERTION_DISABLE=y
+
+# Cache burst-wrap (CONFIG_ESP32S3_*_CACHE_WRAP) does NOT link on IDF 4.4 with
+# octal PSRAM: undefined reference to psram_support_wrap_size. Do not re-enable.
+
+# Long filenames on the SD card; without this readdir() returns 8.3 names
+# like POCKET~1.GBA, which are useless in a game picker.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255

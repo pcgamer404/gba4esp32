@@ -125,7 +125,15 @@ static void hardware_reset() {
 	#if VITA
 		#define THREADED_RENDERER_COUNT 2
 	#else
-		#define THREADED_RENDERER_COUNT 1
+		/* ESP32-S3: the contexts are used as a RING consumed by ONE worker on
+		 * core 1, not as one-context-per-thread. With a single context the
+		 * producer spin-waits on the renderer every scanline and the second
+		 * core buys nothing (measured: emu 13.5, same as inline). The idle-
+		 * loop skip removed the vblank pause that used to drain the ring, so
+		 * depth must now hide the full producer/consumer rate mismatch
+		 * (producer ~41us/line, consumer ~85us/line in-game): 64 slim slots
+		 * (~700B each after the io_registers[64] diet) bank most of a frame. */
+		#define THREADED_RENDERER_COUNT 192
 	#endif
 
 	#include "thread.h"
@@ -150,9 +158,12 @@ static void hardware_reset() {
 		uint32_t background_ver;
 		uint32_t gfxinwin_ver[2];
 
-		uint16_t io_registers[1024 * 16];
-		uint32_t line[6][240];
-		int lineOBJpixleft[128];
+		/* 64, not 512: the renderer reads nothing above REG_WINOUT (0x25) --
+		 * verified by grepping every RENDERER_IO_REGISTERS[] use. Slot size
+		 * is what caps the ring depth, and ring depth is what hides the
+		 * producer/consumer rate mismatch (the idle-loop skip removed the
+		 * vblank pause that used to let the renderer catch up). */
+		uint16_t io_registers[64];
 		bool gfxInWin[2][240];
 
 		bool draw_objwin;
@@ -178,21 +189,40 @@ static void hardware_reset() {
 		int bg3y_h;
 	} renderer_context;
 
+	/* Render scratch is per-WORKER (there is one), not per-slot: consumed
+	 * within a single threaded_render_slot() call. Declared here so
+	 * init_renderer_context below can reset it. */
+	static uint32_t espgba_worker_line[6][240];
+	static int espgba_worker_objpixleft[128];
+
 	static void init_renderer_context(renderer_context& ctx) {
 		ctx.renderer_control = 0;
 		ctx.renderer_state = 0;
 		ctx.background_ver = 0;
 		ctx.gfxinwin_ver[0] = 0;
 		ctx.gfxinwin_ver[1] = 0;
-		memset(ctx.line[Layer_BG0], -1, 240 * sizeof(u32));
-		memset(ctx.line[Layer_BG1], -1, 240 * sizeof(u32));
-		memset(ctx.line[Layer_BG2], -1, 240 * sizeof(u32));
-		memset(ctx.line[Layer_BG3], -1, 240 * sizeof(u32));
+		memset(espgba_worker_line[Layer_BG0], -1, 240 * sizeof(u32));
+		memset(espgba_worker_line[Layer_BG1], -1, 240 * sizeof(u32));
+		memset(espgba_worker_line[Layer_BG2], -1, 240 * sizeof(u32));
+		memset(espgba_worker_line[Layer_BG3], -1, 240 * sizeof(u32));
 	}
 
-	static renderer_context threaded_renderer_contexts[THREADED_RENDERER_COUNT];
+	/* The ring lives in PSRAM: at ~700B/slot only ~64 slots fit internal RAM
+	 * next to the pix DMA buffer, and 64 still stalls the producer for ~25%
+	 * of its life (measured). A FULL FRAME of slots (160+) decouples producer
+	 * and consumer completely; the per-line traffic is ~150 useful bytes each
+	 * way, a rounding error in PSRAM bandwidth. Allocated on first start. */
+	static renderer_context *threaded_renderer_contexts;
 
-	#define INIT_RENDERER_CONTEXT(__renderer_idx__) renderer_context& renderer_ctx = threaded_renderer_contexts[__renderer_idx__]
+	/* The ring worker renders every slot through the <0> template instances,
+	 * bound to the active slot via this pointer. Instantiating the renderer
+	 * for each slot index (upstream's model) creates four copies of ~50KB of
+	 * render code -- with the ESP32-S3's 32KB icache SHARED between both
+	 * cores, that footprint thrashes against the interpreter constantly.
+	 * Written and read only on the render core. */
+	static renderer_context *threaded_ctx_active;
+
+	#define INIT_RENDERER_CONTEXT(__renderer_idx__) renderer_context& renderer_ctx = *threaded_ctx_active
 
 	#define RENDERER_BG2C renderer_ctx.bg2c
 	#define RENDERER_BG3C renderer_ctx.bg3c
@@ -214,12 +244,12 @@ static void hardware_reset() {
 	#define RENDERER_PALETTE paletteRAM
 	#define RENDERER_OAM oam
 
-	#define RENDERER_LINE renderer_ctx.line
+	#define RENDERER_LINE espgba_worker_line
 	#define RENDERER_IO_REGISTERS renderer_ctx.io_registers
 	#define RENDERER_MOSAIC renderer_ctx.mosaic
 	#define RENDERER_BLDMOD renderer_ctx.bldmod
 	#define RENDERER_GRAPHICS_LAYERS renderer_ctx.layers
-	#define RENDERER_LINE_OBJ_PIX_LEFT renderer_ctx.lineOBJpixleft
+	#define RENDERER_LINE_OBJ_PIX_LEFT espgba_worker_objpixleft
 	#define RENDERER_GFX_IN_WIN renderer_ctx.gfxInWin
 
 	#define RENDERER_R_VCOUNT renderer_ctx.vcount
@@ -491,7 +521,16 @@ typedef enum
   REG_HALTCNT = 0x180
 } hardware_register;
 
-static uint16_t io_registers[1024 * 16];
+/* 512 entries, not 1024*16: the highest hardware_register index is
+ * REG_HALTCNT = 0x180 and nothing indexes this computed. The original wasted
+ * 31KB of the ESP32-S3's internal SRAM -- exactly the memory the renderer is
+ * starving for. */
+static uint16_t io_registers[512];
+
+/* ESP32-S3 experiment: when non-NULL, the text-BG renderer reads tiles and
+ * maps from this INTERNAL buffer instead of PSRAM vram. Set by the port. */
+extern "C" u8 *espgba_vram_bg;
+u8 *espgba_vram_bg = NULL;
 
 // Note: Some comments below are from the GBATEK document
 // (http://problemkaputt.de/gbatek.htm).
@@ -667,6 +706,12 @@ static int gbaSaveType = 0; // used to remember the save type on reset
 
 // Waitstates when accessing data
 
+#if USE_TWEAK_SPEEDHACK
+/* Prefetch model removed (see codeTicksAccess* below) -- data accesses no
+ * longer need to maintain it. */
+#define DATATICKS_ACCESS_BUS_PREFETCH(address, value) \
+	int addr = (address >> 24) & 15; (void)addr;
+#else
 #define DATATICKS_ACCESS_BUS_PREFETCH(address, value) \
 	int addr = (address >> 24) & 15; \
 	if ((addr>=0x08) || (addr < 0x02)) \
@@ -680,6 +725,7 @@ static int gbaSaveType = 0; // used to remember the save type on reset
 		waitState = (1 & ~waitState) | (waitState & waitState); \
 		bus.busPrefetchCount = ((bus.busPrefetchCount+1)<<waitState) - 1; \
 	}
+#endif
 
 /* Waitstates when accessing data */
 
@@ -689,6 +735,27 @@ static int gbaSaveType = 0; // used to remember the save type on reset
 #define DATATICKS_ACCESS_16BIT_SEQ(address) (memoryWaitSeq[(address >> 24) & 15])
 
 // Waitstates when executing opcode
+#if USE_TWEAK_SPEEDHACK
+/* ESP32-S3 extension of 44vba's speedhack: drop the gamepak prefetch-buffer
+ * model entirely. These three run once or twice per emulated instruction and
+ * the busPrefetchCount bit-dance dominated their cost. Region-correct
+ * waitstates are kept (IWRAM code still runs at 0 waits); ROM sequential
+ * access charges 1 tick where the modelled prefetch sometimes gave 0 --
+ * close to hardware-with-prefetch, and uniform. */
+static INLINE int codeTicksAccess(u32 address, u8 bit32) // THUMB NON SEQ
+{
+	int addr = (address>>24) & 15;
+	return bit32 ? memoryWait32[addr] : memoryWait[addr];
+}
+static INLINE int codeTicksAccessSeq16(u32 address) // THUMB SEQ
+{
+	return memoryWaitSeq[(address>>24) & 15];
+}
+static INLINE int codeTicksAccessSeq32(u32 address) // ARM SEQ
+{
+	return memoryWaitSeq32[(address>>24) & 15];
+}
+#else
 static INLINE int codeTicksAccess(u32 address, u8 bit32) // THUMB NON SEQ
 {
 	int addr = (address>>24) & 15;
@@ -761,10 +828,390 @@ static INLINE int codeTicksAccessSeq32(u32 address) // ARM SEQ
 	}
 	return memoryWaitSeq32[addr];
 }
+#endif
 
 #define CPUReadByteQuick(addr)		map[(addr)>>24].address[(addr) & map[(addr)>>24].mask]
 #define CPUReadHalfWordQuick(addr)	READ16LE(((u16*)&map[(addr)>>24].address[(addr) & map[(addr)>>24].mask]))
 #define CPUReadMemoryQuick(addr)	READ32LE(((u32*)&map[(addr)>>24].address[(addr) & map[(addr)>>24].mask]))
+
+/* ESP32-S3: pin the hottest interpreter code in internal instruction RAM.
+ *
+ * The whole interpreter (~277KB of handlers) cannot fit, but Pokemon gen 3 is
+ * almost entirely Thumb code and ALL 153 Thumb handlers together are only
+ * ~28KB; CPULoop's dispatch is another ~8KB. Keeping those in IRAM removes
+ * flash-cache misses from the single most-executed path in the firmware
+ * (gpsp-reload measured interpreter-loop placement as its largest win). */
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+#include "esp_attr.h"
+#define ESPGBA_HOT IRAM_ATTR
+/* Cycle accounting for the big consumers inside CPULoop; the ESP port reads
+ * and resets these in its BENCH line. One ccount read per phase, negligible.
+ * 0 = instruction execution, 1 = PPU line render, 2 = APU tick. */
+extern "C" uint32_t espgba_prof[7];
+uint32_t espgba_prof[7];
+extern "C" uint32_t espgba_insns;
+uint32_t espgba_insns;
+extern "C" uint32_t espgba_insns_arm;
+uint32_t espgba_insns_arm;
+/* Hot-PC sampling (port-esp32s3/main/hotpc.c): every 64th instruction. */
+extern "C" uint32_t espgba_hot_tick;
+extern "C" void espgba_hotpc_record(uint32_t pc, uint32_t isArm);
+/* Idle-loop skip: when the PC lands here, the game is busy-waiting on an IO
+ * flag (measured: 46.6%% of ALL execution in Emerald is one vblank spin).
+ * Jump emulated time to the next event instead of interpreting the spin --
+ * the loop still runs once per event, so exit timing stays exact. 1 =
+ * disabled (thumb PCs are even, so it never matches). Set per game by the
+ * port from NVS. */
+extern "C" uint32_t espgba_idle_pc;
+uint32_t espgba_idle_pc = 1;
+/* Native m4a SoundMainRAM (tools/aot/mixer_full.txt is the source listing;
+ * translated instruction-for-instruction from the live IWRAM dump). When the
+ * thumb PC hits espgba_hle_pc (the mixer entry, even address), the whole
+ * function runs natively and the interpreter resumes at its return address.
+ * 1 = disabled. Falls back to interpretation (returns false) whenever any
+ * active channel uses the compressed-sample path (type & 0x30), which is
+ * not translated. */
+extern "C" uint32_t espgba_hle_pc;
+uint32_t espgba_hle_pc = 1;
+/* Emerald ships TWO m4a engine instances with separate IWRAM mixers
+ * (0x03001b50 overworld engine, 0x03002918 title/system engine). The native
+ * replacement is location-independent, so both entries hook to it. */
+extern "C" uint32_t espgba_hle_pc2;
+uint32_t espgba_hle_pc2 = 1;
+extern "C" uint32_t espgba_hle_hits;
+uint32_t espgba_hle_hits;
+extern "C" uint32_t espgba_hle_bails;
+uint32_t espgba_hle_bails;
+/* Diagnostic: counts how often the PC passes through espgba_probe_pc in
+ * either dispatch loop. No side effects; for locating hook points. */
+extern "C" uint32_t espgba_probe_pc;
+uint32_t espgba_probe_pc = 1;
+extern "C" uint32_t espgba_probe_hits;
+uint32_t espgba_probe_hits;
+
+/* GBA address -> host pointer for the regions the mixer touches. */
+static inline u8 *m4aPtr(u32 a)
+{
+   switch (a >> 24) {
+      case 2: return workRAM + (a & 0x3FFFF);
+      case 3: return internalRAM + (a & 0x7FFF);
+      case 8: case 9: return rom + (a & 0x1FFFFFF);
+   }
+   return NULL;
+}
+static inline u32 m4aLd32(u32 a) { u32 v; memcpy(&v, m4aPtr(a), 4); return v; }
+static inline u8  m4aLd8(u32 a)  { return *m4aPtr(a); }
+static inline void m4aSt32(u32 a, u32 v) { memcpy(m4aPtr(a), &v, 4); }
+static inline void m4aSt8(u32 a, u8 v)   { *m4aPtr(a) = v; }
+
+/* The whole of SoundMainRAM, natively. Register/stack interface measured on
+ * hardware: r0=SoundInfo, r4=pcmDmaCounter, r5=frame write window (GBA addr,
+ * right half at +r6), r6=0x630, r8=sample count; SoundMain's stack frame:
+ * [sp+0]=count, [sp+8]=window, [sp+0x14]=maxLines, [sp+0x18]=SoundInfo,
+ * [sp+4/0xc/0x10]=locals; return address at [sp+0x40] after the epilogue's
+ * add sp,#0x1c + pop {r0-r7} (-> r8-fp, r4-r7) + pop {pc}.
+ * Returns false to bail: the caller lets the interpreter run the original. */
+static bool espgba_m4a_native(void)
+{
+   u32 info = bus.reg[0].I;
+   u32 sp   = bus.reg[13].I;
+   if ((info >> 24) != 3 || (sp >> 24) != 3)
+      return false;
+
+   u32 dmaCounter = bus.reg[4].I;
+   u32 bufA       = bus.reg[5].I;   /* half 0; half 1 at +halfGap */
+   u32 halfGap    = bus.reg[6].I;
+   s32 frameCount = (s32)bus.reg[8].I;
+   u32 maxLines   = m4aLd32(sp + 0x14);
+   if (halfGap < 0x100 || halfGap > 0x800 || (bufA >> 24) != 3 ||
+       frameCount <= 0 || frameCount > 0x380)
+      return false;
+
+   u8 reverb   = m4aLd8(info + 5);
+   u8 maxChans = m4aLd8(info + 6);
+   if (maxChans > 12)
+      return false;
+
+   /* Bail if any live channel needs the untranslated compressed path. */
+   for (u32 c = 0; c < maxChans; c++) {
+      u32 ch = info + 0x50 + c * 0x40;
+      if (!(m4aLd8(ch) & 0xC7))
+         continue;
+      if (m4aLd8(ch + 1) & 0x30) {
+         espgba_hle_bails++;
+         return false;
+      }
+      /* refuse odd pointers before any state is mutated */
+      if (!m4aPtr(m4aLd32(ch + 0x24)) ||
+          (!(m4aLd8(ch) & 0x80) && !m4aPtr(m4aLd32(ch + 0x28)))) {
+         espgba_hle_bails++;
+         return false;
+      }
+   }
+
+   u8 *pA = m4aPtr(bufA);
+   u8 *pB = pA + halfGap;
+
+   if (reverb) {
+      /* 0x1b5c: 4-tap average * reverb >> 9 with +1 rounding on bit7 */
+      u8 *q = (dmaCounter == 2) ? m4aPtr(info + 0x350)
+                                : m4aPtr(bufA + (u32)frameCount);
+      u8 *l = pA;
+      for (s32 i = 0; i < frameCount; i++) {
+         s32 v = (s8)l[halfGap] + (s8)l[0] + (s8)q[halfGap] + (s8)q[0];
+         q++;
+         v = (v * (s32)reverb) >> 9;
+         if (v & 0x80)
+            v++;
+         l[halfGap] = (u8)v;
+         *l++ = (u8)v;
+      }
+   } else {
+      memset(pA, 0, (size_t)frameCount);
+      memset(pB, 0, (size_t)frameCount);
+   }
+
+   u32 divFreq   = m4aLd32(info + 0x18);
+   u32 masterVol = (u32)m4aLd8(info + 7) + 1;
+   u32 ch        = info + 0x50;
+
+   for (s32 left = maxChans; left > 0; left--, ch += 0x40) {
+      /* 0x1bec: per-channel scanline deadline (abort when out of time) */
+      if (maxLines) {
+         u32 vc = io_registers[REG_VCOUNT] & 0xFF;
+         if (vc < 0xA0)
+            vc += 0xE4;
+         if (vc >= maxLines)
+            break;
+      }
+
+      u8 st = m4aLd8(ch);
+      if (!(st & 0xC7))
+         continue;
+      u32 wav = m4aLd32(ch + 0x24);
+      u32 env;
+
+      if (st & 0x80) {
+         if (st & 0x40) {           /* start+stop -> kill */
+            m4aSt8(ch, 0);
+            continue;
+         }
+         st = 3;                    /* attack */
+         m4aSt8(ch, 3);
+         u32 off = m4aLd32(ch + 0x18);
+         m4aSt32(ch + 0x28, wav + 0x10 + off);
+         m4aSt32(ch + 0x18, m4aLd32(wav + 0xC) - off);
+         m4aSt8(ch + 9, 0);
+         m4aSt32(ch + 0x1C, 0);
+         env = 0;
+         if (m4aLd8(wav + 3) & 0xC0) {
+            st |= 0x10;             /* looped sample */
+            m4aSt8(ch, st);
+         }
+         goto attack;
+      }
+      env = m4aLd8(ch + 9);
+      if (st & 4) {                 /* pseudo-echo countdown */
+         u8 el = (u8)(m4aLd8(ch + 0xD) - 1);
+         m4aSt8(ch + 0xD, el);
+         if (el >= 1)
+            goto store_env;
+         m4aSt8(ch, 0);
+         continue;
+      }
+      if (st & 0x40) {              /* release */
+         env = (env * m4aLd8(ch + 7)) >> 8;
+         if (env > m4aLd8(ch + 0xC))
+            goto store_env;
+      echo_init:
+         if (m4aLd8(ch + 0xC) == 0) {
+            m4aSt8(ch, 0);
+            continue;
+         }
+         env = m4aLd8(ch + 0xC);
+         st |= 4;
+         m4aSt8(ch, st);
+         goto store_env;
+      }
+      switch (st & 3) {
+         case 2:                    /* decay */
+            env = (env * m4aLd8(ch + 5)) >> 8;
+            {
+               u8 sus = m4aLd8(ch + 6);
+               if (env > sus)
+                  goto store_env;
+               env = sus;
+               if (sus == 0)
+                  goto echo_init;
+               st -= 1;
+               m4aSt8(ch, st);
+            }
+            goto store_env;
+         case 3:                    /* attack */
+         attack:
+            env += m4aLd8(ch + 4);
+            if (env >= 0xFF) {
+               env = 0xFF;
+               st -= 1;
+               m4aSt8(ch, st);
+            }
+            goto store_env;
+         default:                   /* sustain / off: level held */
+            break;
+      }
+   store_env:
+      m4aSt8(ch + 9, (u8)env);
+
+      /* volumes (0x1cb0) */
+      u32 envScaled = (env * masterVol) >> 4;
+      u8 volA = (u8)((envScaled * m4aLd8(ch + 2)) >> 8);
+      u8 volB = (u8)((envScaled * m4aLd8(ch + 3)) >> 8);
+      m4aSt8(ch + 0xA, volA);
+      m4aSt8(ch + 0xB, volB);
+
+      u32 loopStart = 0, loopLen = 0;
+      if (st & 0x10) {
+         u32 ls    = m4aLd32(wav + 8);
+         loopStart = wav + 0x10 + ls;
+         loopLen   = m4aLd32(wav + 0xC) - ls;
+      }
+
+      s32 remain = (s32)m4aLd32(ch + 0x18);
+      u32 cur    = m4aLd32(ch + 0x28);
+      u32 fw     = m4aLd32(ch + 0x1C);
+      u8 type    = m4aLd8(ch + 1);
+      s32 out    = frameCount;
+      u8 *dA = pA, *dB = pB;
+
+      if (type & 8) {
+         /* kernel A (0x1d24): 1:1 rate, no resampling */
+         const s8 *src = (const s8 *)m4aPtr(cur);
+         bool dead = false;
+         while (out > 0) {
+            s32 n = remain < out ? remain : out;
+            for (s32 i = 0; i < n; i++) {
+               s32 smp = *src++;
+               dA[i] = (u8)(dA[i] + (u8)(((s32)volA * smp) >> 8));
+               dB[i] = (u8)(dB[i] + (u8)(((s32)volB * smp) >> 8));
+            }
+            dA += n; dB += n;
+            cur += (u32)n;
+            out -= n;
+            remain -= n;
+            if (remain == 0) {
+               if (loopLen) {
+                  cur    = loopStart;
+                  src    = (const s8 *)m4aPtr(cur);
+                  remain = (s32)loopLen;
+               } else {
+                  m4aSt8(ch, 0);
+                  dead = true;
+                  break;
+               }
+            }
+         }
+         if (!dead) {
+            m4aSt32(ch + 0x18, (u32)remain);
+            m4aSt32(ch + 0x28, cur);
+         }
+      } else {
+         /* kernel B (0x1e44): fractional-position linear interpolation */
+         u32 step = divFreq * m4aLd32(ch + 0x20);
+         const s8 *base3 = (const s8 *)m4aPtr(cur);
+         s32 c0 = base3[0];
+         s32 delta = base3[1] - c0;
+         u32 pos = cur + 1;         /* mirrors r3 after ldrsb [r3,#1]! */
+         bool dead = false;
+         while (out > 0) {
+            s32 prod = (s32)((u32)fw * (u32)delta);
+            s32 smp  = c0 + (prod >> 23);
+            *dA = (u8)(*dA + (u8)(((s32)volA * smp) >> 8));
+            *dB = (u8)(*dB + (u8)(((s32)volB * smp) >> 8));
+            dA++; dB++; out--;
+            fw += step;
+            u32 adv = fw >> 23;
+            if (adv) {
+               fw &= ~0x3F800000u;
+               remain -= (s32)adv;
+               if (remain <= 0) {
+                  /* 0x1ddc: sample end -> loop wrap or kill */
+                  if (!loopLen) {
+                     m4aSt8(ch, 0);
+                     dead = true;
+                     break;
+                  }
+                  s32 lr = -remain;
+                  s32 r2 = remain;
+                  do {
+                     r2 += (s32)loopLen;
+                     if (r2 > 0) break;
+                     lr -= (s32)loopLen;
+                  } while (1);
+                  remain = r2;
+                  pos = loopStart + (u32)lr;
+                  c0  = *(const s8 *)m4aPtr(pos);
+                  pos += 1;
+                  delta = *(const s8 *)m4aPtr(pos) - c0;
+               } else if (adv == 1) {
+                  c0 += delta;      /* becomes the old 'next' */
+                  pos += 1;
+                  delta = *(const s8 *)m4aPtr(pos) - c0;
+               } else {
+                  pos += adv - 1;
+                  c0 = *(const s8 *)m4aPtr(pos);
+                  pos += 1;
+                  delta = *(const s8 *)m4aPtr(pos) - c0;
+               }
+            }
+         }
+         if (!dead) {
+            /* 0x1ec8: r3 -= 1 before the store */
+            m4aSt32(ch + 0x1C, fw);
+            m4aSt32(ch + 0x18, (u32)remain);
+            m4aSt32(ch + 0x28, pos - 1);
+         }
+      }
+   }
+
+   /* Epilogue (0x1ef2): unlock the ident, unwind SoundMain's frame. */
+   m4aSt32(m4aLd32(sp + 0x18), 0x68736D53u);
+   u32 base = sp + 0x1C;
+   bus.reg[8].I  = m4aLd32(base + 0x00);
+   bus.reg[9].I  = m4aLd32(base + 0x04);
+   bus.reg[10].I = m4aLd32(base + 0x08);
+   bus.reg[11].I = m4aLd32(base + 0x0C);
+   bus.reg[4].I  = m4aLd32(base + 0x10);
+   bus.reg[5].I  = m4aLd32(base + 0x14);
+   bus.reg[6].I  = m4aLd32(base + 0x18);
+   bus.reg[7].I  = m4aLd32(base + 0x1C);
+   u32 ret = m4aLd32(base + 0x20);
+   bus.reg[13].I = base + 0x24;
+
+   /* thumb47-style return into SoundMain (thumb) */
+   bus.busPrefetchCount = 0;
+   bus.reg[15].I = ret & 0xFFFFFFFE;
+   if (!(ret & 1))
+      return false; /* would be an ARM return: never happens, bail hard */
+   armState = false;
+   bus.armNextPC = bus.reg[15].I;
+   bus.reg[15].I += 2;
+   THUMB_PREFETCH;
+   espgba_hle_hits++;
+   return true;
+}
+void *espgba_arm_fn[256];
+uint32_t espgba_arm_fncnt[256];
+static inline uint32_t espgba_cc(void) {
+	uint32_t r; asm volatile("rsr.ccount %0" : "=a"(r)); return r;
+}
+#define PROF_BEGIN() uint32_t _pcc0 = espgba_cc()
+#define PROF_END(i) (espgba_prof[i] += espgba_cc() - _pcc0)
+#else
+#define ESPGBA_HOT
+#define PROF_BEGIN() do {} while (0)
+#define PROF_END(i) do {} while (0)
+#endif
 
 static bool stopState = false;
 extern bool cpuSramEnabled;
@@ -3049,6 +3496,26 @@ static void armUnknownInsn(u32 opcode)
 // ISREGSHIFT: 1 for insns of the form ...,Rn LSL/etc Rs; 0 otherwise
 // ALU_INIT, GETVALUE and OP are concatenated in order.
 
+/* Measured-hot ARM handlers (per-function profile, Ruby+Emerald attract):
+ * the top ~15 functions carry ~85% of ARM execution but total only a few KB.
+ * Forward declarations with a section attribute pull just these macro-
+ * generated instances into IRAM; the blanket approach (all 261 ALU handlers,
+ * 84KB) starved the internal heap below the framebuffer allocation. */
+static void arm009(u32 opcode) __attribute__((section(".iram1.hot0")));
+static void arm040(u32 opcode) __attribute__((section(".iram1.hot1")));
+static void arm050(u32 opcode) __attribute__((section(".iram1.hot2")));
+static void arm080(u32 opcode) __attribute__((section(".iram1.hot3")));
+static void arm084(u32 opcode) __attribute__((section(".iram1.hot4")));
+static void arm086(u32 opcode) __attribute__((section(".iram1.hot5")));
+static void arm08C(u32 opcode) __attribute__((section(".iram1.hot6")));
+static void arm0DD(u32 opcode) __attribute__((section(".iram1.hot7")));
+static void arm250(u32 opcode) __attribute__((section(".iram1.hot8")));
+static void arm290(u32 opcode) __attribute__((section(".iram1.hot9")));
+static void arm3C0(u32 opcode) __attribute__((section(".iram1.hot10")));
+static void arm3CF(u32 opcode) __attribute__((section(".iram1.hot11")));
+static void arm1B0(u32 opcode) __attribute__((section(".iram1.hot12")));
+static void arm1D0(u32 opcode) __attribute__((section(".iram1.hot13")));
+
 #define ALU_INSN(ALU_INIT, GETVALUE, OP, MODECHANGE, ISREGSHIFT) \
     ALU_INIT GETVALUE OP;                                        \
     if ((opcode & 0x0000F000) != 0x0000F000) {                   \
@@ -3603,9 +4070,9 @@ static  void arm01D(u32 opcode) { LDR_POSTDEC(OFFSET_REG, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn], #-offset
 static  void arm05D(u32 opcode) { LDR_POSTDEC(OFFSET_IMM8, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn], Rm
-static  void arm09D(u32 opcode) { LDR_POSTINC(OFFSET_REG, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm09D(u32 opcode) { LDR_POSTINC(OFFSET_REG, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn], #offset
-static  void arm0DD(u32 opcode) { LDR_POSTINC(OFFSET_IMM8, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm0DD(u32 opcode) { LDR_POSTINC(OFFSET_IMM8, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, -Rm]
 static  void arm11D(u32 opcode) { LDR_PREDEC(OFFSET_REG, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, -Rm]!
@@ -3613,15 +4080,15 @@ static  void arm13D(u32 opcode) { LDR_PREDEC_WB(OFFSET_REG, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, -#offset]
 static  void arm15D(u32 opcode) { LDR_PREDEC(OFFSET_IMM8, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, -#offset]!
-static  void arm17D(u32 opcode) { LDR_PREDEC_WB(OFFSET_IMM8, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm17D(u32 opcode) { LDR_PREDEC_WB(OFFSET_IMM8, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, Rm]
-static  void arm19D(u32 opcode) { LDR_PREINC(OFFSET_REG, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm19D(u32 opcode) { LDR_PREINC(OFFSET_REG, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, Rm]!
-static  void arm1BD(u32 opcode) { LDR_PREINC_WB(OFFSET_REG, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm1BD(u32 opcode) { LDR_PREINC_WB(OFFSET_REG, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, #offset]
-static  void arm1DD(u32 opcode) { LDR_PREINC(OFFSET_IMM8, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm1DD(u32 opcode) { LDR_PREINC(OFFSET_IMM8, OP_LDRSB, 16); }
 // LDRSB Rd, [Rn, #offset]!
-static  void arm1FD(u32 opcode) { LDR_PREINC_WB(OFFSET_IMM8, OP_LDRSB, 16); }
+static void ESPGBA_HOT arm1FD(u32 opcode) { LDR_PREINC_WB(OFFSET_IMM8, OP_LDRSB, 16); }
 
 // LDRSH Rd, [Rn], -Rm
 static  void arm01F(u32 opcode) { LDR_POSTDEC(OFFSET_REG, OP_LDRSH, 16); }
@@ -4535,7 +5002,7 @@ static  void arm9F0(u32 opcode)
 // B/BL/SWI and (unimplemented) coproc support ////////////////////////////
 
 // B <offset>
-static  void armA00(u32 opcode)
+static void ESPGBA_HOT armA00(u32 opcode)
 {
 	int offset = opcode & 0x00FFFFFF;
 	if (offset & 0x00800000)
@@ -4550,7 +5017,7 @@ static  void armA00(u32 opcode)
 }
 
 // BL <offset>
-static  void armB00(u32 opcode)
+static void ESPGBA_HOT armB00(u32 opcode)
 {
 	int offset = opcode & 0x00FFFFFF;
 	if (offset & 0x00800000)
@@ -4881,6 +5348,15 @@ static int armExecute (void)
          cond2 = (opcode>>4)&0x0F;
 
          (*armInsnTable[(cond1| cond2)])(opcode);
+#ifdef ESP_PLATFORM
+      espgba_insns_arm++;
+      if (++espgba_hot_tick >= 64) {
+         espgba_hot_tick = 0;
+         espgba_hotpc_record(oldArmNextPC, 1);
+      }
+      if (bus.armNextPC == espgba_probe_pc)
+         espgba_probe_hits++;
+#endif
 
       }
       ct = clockTicks;
@@ -4908,7 +5384,7 @@ static int armExecute (void)
 	GBA THUMB CORE
 ============================================================ */
 
-static  void thumbUnknownInsn(u32 opcode)
+static void ESPGBA_HOT thumbUnknownInsn(u32 opcode)
 {
 	u32 PC = bus.reg[15].I;
 	bool savedArmState = armState;
@@ -5230,38 +5706,38 @@ static  void thumbUnknownInsn(u32 opcode)
 // Shift instructions /////////////////////////////////////////////////////
 
 #define DEFINE_IMM5_INSN(OP,BASE) \
-  static  void thumb##BASE##_00(u32 opcode) { IMM5_INSN_0(OP##_0); } \
-  static  void thumb##BASE##_01(u32 opcode) { IMM5_INSN(OP, 1); } \
-  static  void thumb##BASE##_02(u32 opcode) { IMM5_INSN(OP, 2); } \
-  static  void thumb##BASE##_03(u32 opcode) { IMM5_INSN(OP, 3); } \
-  static  void thumb##BASE##_04(u32 opcode) { IMM5_INSN(OP, 4); } \
-  static  void thumb##BASE##_05(u32 opcode) { IMM5_INSN(OP, 5); } \
-  static  void thumb##BASE##_06(u32 opcode) { IMM5_INSN(OP, 6); } \
-  static  void thumb##BASE##_07(u32 opcode) { IMM5_INSN(OP, 7); } \
-  static  void thumb##BASE##_08(u32 opcode) { IMM5_INSN(OP, 8); } \
-  static  void thumb##BASE##_09(u32 opcode) { IMM5_INSN(OP, 9); } \
-  static  void thumb##BASE##_0A(u32 opcode) { IMM5_INSN(OP,10); } \
-  static  void thumb##BASE##_0B(u32 opcode) { IMM5_INSN(OP,11); } \
-  static  void thumb##BASE##_0C(u32 opcode) { IMM5_INSN(OP,12); } \
-  static  void thumb##BASE##_0D(u32 opcode) { IMM5_INSN(OP,13); } \
-  static  void thumb##BASE##_0E(u32 opcode) { IMM5_INSN(OP,14); } \
-  static  void thumb##BASE##_0F(u32 opcode) { IMM5_INSN(OP,15); } \
-  static  void thumb##BASE##_10(u32 opcode) { IMM5_INSN(OP,16); } \
-  static  void thumb##BASE##_11(u32 opcode) { IMM5_INSN(OP,17); } \
-  static  void thumb##BASE##_12(u32 opcode) { IMM5_INSN(OP,18); } \
-  static  void thumb##BASE##_13(u32 opcode) { IMM5_INSN(OP,19); } \
-  static  void thumb##BASE##_14(u32 opcode) { IMM5_INSN(OP,20); } \
-  static  void thumb##BASE##_15(u32 opcode) { IMM5_INSN(OP,21); } \
-  static  void thumb##BASE##_16(u32 opcode) { IMM5_INSN(OP,22); } \
-  static  void thumb##BASE##_17(u32 opcode) { IMM5_INSN(OP,23); } \
-  static  void thumb##BASE##_18(u32 opcode) { IMM5_INSN(OP,24); } \
-  static  void thumb##BASE##_19(u32 opcode) { IMM5_INSN(OP,25); } \
-  static  void thumb##BASE##_1A(u32 opcode) { IMM5_INSN(OP,26); } \
-  static  void thumb##BASE##_1B(u32 opcode) { IMM5_INSN(OP,27); } \
-  static  void thumb##BASE##_1C(u32 opcode) { IMM5_INSN(OP,28); } \
-  static  void thumb##BASE##_1D(u32 opcode) { IMM5_INSN(OP,29); } \
-  static  void thumb##BASE##_1E(u32 opcode) { IMM5_INSN(OP,30); } \
-  static  void thumb##BASE##_1F(u32 opcode) { IMM5_INSN(OP,31); }
+  static void ESPGBA_HOT thumb##BASE##_00(u32 opcode) { IMM5_INSN_0(OP##_0); } \
+  static void ESPGBA_HOT thumb##BASE##_01(u32 opcode) { IMM5_INSN(OP, 1); } \
+  static void ESPGBA_HOT thumb##BASE##_02(u32 opcode) { IMM5_INSN(OP, 2); } \
+  static void ESPGBA_HOT thumb##BASE##_03(u32 opcode) { IMM5_INSN(OP, 3); } \
+  static void ESPGBA_HOT thumb##BASE##_04(u32 opcode) { IMM5_INSN(OP, 4); } \
+  static void ESPGBA_HOT thumb##BASE##_05(u32 opcode) { IMM5_INSN(OP, 5); } \
+  static void ESPGBA_HOT thumb##BASE##_06(u32 opcode) { IMM5_INSN(OP, 6); } \
+  static void ESPGBA_HOT thumb##BASE##_07(u32 opcode) { IMM5_INSN(OP, 7); } \
+  static void ESPGBA_HOT thumb##BASE##_08(u32 opcode) { IMM5_INSN(OP, 8); } \
+  static void ESPGBA_HOT thumb##BASE##_09(u32 opcode) { IMM5_INSN(OP, 9); } \
+  static void ESPGBA_HOT thumb##BASE##_0A(u32 opcode) { IMM5_INSN(OP,10); } \
+  static void ESPGBA_HOT thumb##BASE##_0B(u32 opcode) { IMM5_INSN(OP,11); } \
+  static void ESPGBA_HOT thumb##BASE##_0C(u32 opcode) { IMM5_INSN(OP,12); } \
+  static void ESPGBA_HOT thumb##BASE##_0D(u32 opcode) { IMM5_INSN(OP,13); } \
+  static void ESPGBA_HOT thumb##BASE##_0E(u32 opcode) { IMM5_INSN(OP,14); } \
+  static void ESPGBA_HOT thumb##BASE##_0F(u32 opcode) { IMM5_INSN(OP,15); } \
+  static void ESPGBA_HOT thumb##BASE##_10(u32 opcode) { IMM5_INSN(OP,16); } \
+  static void ESPGBA_HOT thumb##BASE##_11(u32 opcode) { IMM5_INSN(OP,17); } \
+  static void ESPGBA_HOT thumb##BASE##_12(u32 opcode) { IMM5_INSN(OP,18); } \
+  static void ESPGBA_HOT thumb##BASE##_13(u32 opcode) { IMM5_INSN(OP,19); } \
+  static void ESPGBA_HOT thumb##BASE##_14(u32 opcode) { IMM5_INSN(OP,20); } \
+  static void ESPGBA_HOT thumb##BASE##_15(u32 opcode) { IMM5_INSN(OP,21); } \
+  static void ESPGBA_HOT thumb##BASE##_16(u32 opcode) { IMM5_INSN(OP,22); } \
+  static void ESPGBA_HOT thumb##BASE##_17(u32 opcode) { IMM5_INSN(OP,23); } \
+  static void ESPGBA_HOT thumb##BASE##_18(u32 opcode) { IMM5_INSN(OP,24); } \
+  static void ESPGBA_HOT thumb##BASE##_19(u32 opcode) { IMM5_INSN(OP,25); } \
+  static void ESPGBA_HOT thumb##BASE##_1A(u32 opcode) { IMM5_INSN(OP,26); } \
+  static void ESPGBA_HOT thumb##BASE##_1B(u32 opcode) { IMM5_INSN(OP,27); } \
+  static void ESPGBA_HOT thumb##BASE##_1C(u32 opcode) { IMM5_INSN(OP,28); } \
+  static void ESPGBA_HOT thumb##BASE##_1D(u32 opcode) { IMM5_INSN(OP,29); } \
+  static void ESPGBA_HOT thumb##BASE##_1E(u32 opcode) { IMM5_INSN(OP,30); } \
+  static void ESPGBA_HOT thumb##BASE##_1F(u32 opcode) { IMM5_INSN(OP,31); }
 
 // LSL Rd, Rm, #Imm 5
 DEFINE_IMM5_INSN(IMM5_LSL,00)
@@ -5273,24 +5749,24 @@ DEFINE_IMM5_INSN(IMM5_ASR,10)
 // 3-argument ADD/SUB /////////////////////////////////////////////////////
 
 #define DEFINE_REG3_INSN(OP,BASE) \
-  static  void thumb##BASE##_0(u32 opcode) { THREEARG_INSN(OP,0); } \
-  static  void thumb##BASE##_1(u32 opcode) { THREEARG_INSN(OP,1); } \
-  static  void thumb##BASE##_2(u32 opcode) { THREEARG_INSN(OP,2); } \
-  static  void thumb##BASE##_3(u32 opcode) { THREEARG_INSN(OP,3); } \
-  static  void thumb##BASE##_4(u32 opcode) { THREEARG_INSN(OP,4); } \
-  static  void thumb##BASE##_5(u32 opcode) { THREEARG_INSN(OP,5); } \
-  static  void thumb##BASE##_6(u32 opcode) { THREEARG_INSN(OP,6); } \
-  static  void thumb##BASE##_7(u32 opcode) { THREEARG_INSN(OP,7); }
+  static void ESPGBA_HOT thumb##BASE##_0(u32 opcode) { THREEARG_INSN(OP,0); } \
+  static void ESPGBA_HOT thumb##BASE##_1(u32 opcode) { THREEARG_INSN(OP,1); } \
+  static void ESPGBA_HOT thumb##BASE##_2(u32 opcode) { THREEARG_INSN(OP,2); } \
+  static void ESPGBA_HOT thumb##BASE##_3(u32 opcode) { THREEARG_INSN(OP,3); } \
+  static void ESPGBA_HOT thumb##BASE##_4(u32 opcode) { THREEARG_INSN(OP,4); } \
+  static void ESPGBA_HOT thumb##BASE##_5(u32 opcode) { THREEARG_INSN(OP,5); } \
+  static void ESPGBA_HOT thumb##BASE##_6(u32 opcode) { THREEARG_INSN(OP,6); } \
+  static void ESPGBA_HOT thumb##BASE##_7(u32 opcode) { THREEARG_INSN(OP,7); }
 
 #define DEFINE_IMM3_INSN(OP,BASE) \
-  static  void thumb##BASE##_0(u32 opcode) { THREEARG_INSN(OP##_0,0); } \
-  static  void thumb##BASE##_1(u32 opcode) { THREEARG_INSN(OP,1); } \
-  static  void thumb##BASE##_2(u32 opcode) { THREEARG_INSN(OP,2); } \
-  static  void thumb##BASE##_3(u32 opcode) { THREEARG_INSN(OP,3); } \
-  static  void thumb##BASE##_4(u32 opcode) { THREEARG_INSN(OP,4); } \
-  static  void thumb##BASE##_5(u32 opcode) { THREEARG_INSN(OP,5); } \
-  static  void thumb##BASE##_6(u32 opcode) { THREEARG_INSN(OP,6); } \
-  static  void thumb##BASE##_7(u32 opcode) { THREEARG_INSN(OP,7); }
+  static void ESPGBA_HOT thumb##BASE##_0(u32 opcode) { THREEARG_INSN(OP##_0,0); } \
+  static void ESPGBA_HOT thumb##BASE##_1(u32 opcode) { THREEARG_INSN(OP,1); } \
+  static void ESPGBA_HOT thumb##BASE##_2(u32 opcode) { THREEARG_INSN(OP,2); } \
+  static void ESPGBA_HOT thumb##BASE##_3(u32 opcode) { THREEARG_INSN(OP,3); } \
+  static void ESPGBA_HOT thumb##BASE##_4(u32 opcode) { THREEARG_INSN(OP,4); } \
+  static void ESPGBA_HOT thumb##BASE##_5(u32 opcode) { THREEARG_INSN(OP,5); } \
+  static void ESPGBA_HOT thumb##BASE##_6(u32 opcode) { THREEARG_INSN(OP,6); } \
+  static void ESPGBA_HOT thumb##BASE##_7(u32 opcode) { THREEARG_INSN(OP,7); }
 
 // ADD Rd, Rs, Rn
 DEFINE_REG3_INSN(ADD_RD_RS_RN,18)
@@ -5304,77 +5780,77 @@ DEFINE_IMM3_INSN(SUB_RD_RS_O3,1E)
 // MOV/CMP/ADD/SUB immediate //////////////////////////////////////////////
 
 // MOV R0, #Offset8
-static  void thumb20(u32 opcode) { MOV_RN_O8(0); }
+static void ESPGBA_HOT thumb20(u32 opcode) { MOV_RN_O8(0); }
 // MOV R1, #Offset8
-static  void thumb21(u32 opcode) { MOV_RN_O8(1); }
+static void ESPGBA_HOT thumb21(u32 opcode) { MOV_RN_O8(1); }
 // MOV R2, #Offset8
-static  void thumb22(u32 opcode) { MOV_RN_O8(2); }
+static void ESPGBA_HOT thumb22(u32 opcode) { MOV_RN_O8(2); }
 // MOV R3, #Offset8
-static  void thumb23(u32 opcode) { MOV_RN_O8(3); }
+static void ESPGBA_HOT thumb23(u32 opcode) { MOV_RN_O8(3); }
 // MOV R4, #Offset8
-static  void thumb24(u32 opcode) { MOV_RN_O8(4); }
+static void ESPGBA_HOT thumb24(u32 opcode) { MOV_RN_O8(4); }
 // MOV R5, #Offset8
-static  void thumb25(u32 opcode) { MOV_RN_O8(5); }
+static void ESPGBA_HOT thumb25(u32 opcode) { MOV_RN_O8(5); }
 // MOV R6, #Offset8
-static  void thumb26(u32 opcode) { MOV_RN_O8(6); }
+static void ESPGBA_HOT thumb26(u32 opcode) { MOV_RN_O8(6); }
 // MOV R7, #Offset8
-static  void thumb27(u32 opcode) { MOV_RN_O8(7); }
+static void ESPGBA_HOT thumb27(u32 opcode) { MOV_RN_O8(7); }
 
 // CMP R0, #Offset8
-static  void thumb28(u32 opcode) { CMP_RN_O8(0); }
+static void ESPGBA_HOT thumb28(u32 opcode) { CMP_RN_O8(0); }
 // CMP R1, #Offset8
-static  void thumb29(u32 opcode) { CMP_RN_O8(1); }
+static void ESPGBA_HOT thumb29(u32 opcode) { CMP_RN_O8(1); }
 // CMP R2, #Offset8
-static  void thumb2A(u32 opcode) { CMP_RN_O8(2); }
+static void ESPGBA_HOT thumb2A(u32 opcode) { CMP_RN_O8(2); }
 // CMP R3, #Offset8
-static  void thumb2B(u32 opcode) { CMP_RN_O8(3); }
+static void ESPGBA_HOT thumb2B(u32 opcode) { CMP_RN_O8(3); }
 // CMP R4, #Offset8
-static  void thumb2C(u32 opcode) { CMP_RN_O8(4); }
+static void ESPGBA_HOT thumb2C(u32 opcode) { CMP_RN_O8(4); }
 // CMP R5, #Offset8
-static  void thumb2D(u32 opcode) { CMP_RN_O8(5); }
+static void ESPGBA_HOT thumb2D(u32 opcode) { CMP_RN_O8(5); }
 // CMP R6, #Offset8
-static  void thumb2E(u32 opcode) { CMP_RN_O8(6); }
+static void ESPGBA_HOT thumb2E(u32 opcode) { CMP_RN_O8(6); }
 // CMP R7, #Offset8
-static  void thumb2F(u32 opcode) { CMP_RN_O8(7); }
+static void ESPGBA_HOT thumb2F(u32 opcode) { CMP_RN_O8(7); }
 
 // ADD R0,#Offset8
-static  void thumb30(u32 opcode) { ADD_RN_O8(0); }
+static void ESPGBA_HOT thumb30(u32 opcode) { ADD_RN_O8(0); }
 // ADD R1,#Offset8
-static  void thumb31(u32 opcode) { ADD_RN_O8(1); }
+static void ESPGBA_HOT thumb31(u32 opcode) { ADD_RN_O8(1); }
 // ADD R2,#Offset8
-static  void thumb32(u32 opcode) { ADD_RN_O8(2); }
+static void ESPGBA_HOT thumb32(u32 opcode) { ADD_RN_O8(2); }
 // ADD R3,#Offset8
-static  void thumb33(u32 opcode) { ADD_RN_O8(3); }
+static void ESPGBA_HOT thumb33(u32 opcode) { ADD_RN_O8(3); }
 // ADD R4,#Offset8
-static  void thumb34(u32 opcode) { ADD_RN_O8(4); }
+static void ESPGBA_HOT thumb34(u32 opcode) { ADD_RN_O8(4); }
 // ADD R5,#Offset8
-static  void thumb35(u32 opcode) { ADD_RN_O8(5); }
+static void ESPGBA_HOT thumb35(u32 opcode) { ADD_RN_O8(5); }
 // ADD R6,#Offset8
-static  void thumb36(u32 opcode) { ADD_RN_O8(6); }
+static void ESPGBA_HOT thumb36(u32 opcode) { ADD_RN_O8(6); }
 // ADD R7,#Offset8
-static  void thumb37(u32 opcode) { ADD_RN_O8(7); }
+static void ESPGBA_HOT thumb37(u32 opcode) { ADD_RN_O8(7); }
 
 // SUB R0,#Offset8
-static  void thumb38(u32 opcode) { SUB_RN_O8(0); }
+static void ESPGBA_HOT thumb38(u32 opcode) { SUB_RN_O8(0); }
 // SUB R1,#Offset8
-static  void thumb39(u32 opcode) { SUB_RN_O8(1); }
+static void ESPGBA_HOT thumb39(u32 opcode) { SUB_RN_O8(1); }
 // SUB R2,#Offset8
-static  void thumb3A(u32 opcode) { SUB_RN_O8(2); }
+static void ESPGBA_HOT thumb3A(u32 opcode) { SUB_RN_O8(2); }
 // SUB R3,#Offset8
-static  void thumb3B(u32 opcode) { SUB_RN_O8(3); }
+static void ESPGBA_HOT thumb3B(u32 opcode) { SUB_RN_O8(3); }
 // SUB R4,#Offset8
-static  void thumb3C(u32 opcode) { SUB_RN_O8(4); }
+static void ESPGBA_HOT thumb3C(u32 opcode) { SUB_RN_O8(4); }
 // SUB R5,#Offset8
-static  void thumb3D(u32 opcode) { SUB_RN_O8(5); }
+static void ESPGBA_HOT thumb3D(u32 opcode) { SUB_RN_O8(5); }
 // SUB R6,#Offset8
-static  void thumb3E(u32 opcode) { SUB_RN_O8(6); }
+static void ESPGBA_HOT thumb3E(u32 opcode) { SUB_RN_O8(6); }
 // SUB R7,#Offset8
-static  void thumb3F(u32 opcode) { SUB_RN_O8(7); }
+static void ESPGBA_HOT thumb3F(u32 opcode) { SUB_RN_O8(7); }
 
 // ALU operations /////////////////////////////////////////////////////////
 
 // AND Rd, Rs
-static  void thumb40_0(u32 opcode)
+static void ESPGBA_HOT thumb40_0(u32 opcode)
 {
   int dest = opcode & 7;
   u32 val = (bus.reg[dest].I & bus.reg[(opcode >> 3)&7].I);
@@ -5388,7 +5864,7 @@ static  void thumb40_0(u32 opcode)
 }
 
 // EOR Rd, Rs
-static  void thumb40_1(u32 opcode)
+static void ESPGBA_HOT thumb40_1(u32 opcode)
 {
   int dest = opcode & 7;
   bus.reg[dest].I ^= bus.reg[(opcode >> 3)&7].I;
@@ -5397,7 +5873,7 @@ static  void thumb40_1(u32 opcode)
 }
 
 // LSL Rd, Rs
-static  void thumb40_2(u32 opcode)
+static void ESPGBA_HOT thumb40_2(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[(opcode >> 3)&7].B.B0;
@@ -5420,7 +5896,7 @@ static  void thumb40_2(u32 opcode)
 }
 
 // LSR Rd, Rs
-static  void thumb40_3(u32 opcode)
+static void ESPGBA_HOT thumb40_3(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[(opcode >> 3)&7].B.B0;
@@ -5443,7 +5919,7 @@ static  void thumb40_3(u32 opcode)
 }
 
 // ASR Rd, Rs
-static  void thumb41_0(u32 opcode)
+static void ESPGBA_HOT thumb41_0(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[(opcode >> 3)&7].B.B0;
@@ -5468,7 +5944,7 @@ static  void thumb41_0(u32 opcode)
 }
 
 // ADC Rd, Rs
-static  void thumb41_1(u32 opcode)
+static void ESPGBA_HOT thumb41_1(u32 opcode)
 {
   int dest = opcode & 0x07;
   u32 value = bus.reg[(opcode >> 3)&7].I;
@@ -5476,7 +5952,7 @@ static  void thumb41_1(u32 opcode)
 }
 
 // SBC Rd, Rs
-static  void thumb41_2(u32 opcode)
+static void ESPGBA_HOT thumb41_2(u32 opcode)
 {
   int dest = opcode & 0x07;
   u32 value = bus.reg[(opcode >> 3)&7].I;
@@ -5484,7 +5960,7 @@ static  void thumb41_2(u32 opcode)
 }
 
 // ROR Rd, Rs
-static  void thumb41_3(u32 opcode)
+static void ESPGBA_HOT thumb41_3(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[(opcode >> 3)&7].B.B0;
@@ -5504,7 +5980,7 @@ static  void thumb41_3(u32 opcode)
 }
 
 // TST Rd, Rs
-static  void thumb42_0(u32 opcode)
+static void ESPGBA_HOT thumb42_0(u32 opcode)
 {
   u32 value = bus.reg[opcode & 7].I & bus.reg[(opcode >> 3) & 7].I;
   N_FLAG = value & 0x80000000 ? true : false;
@@ -5512,7 +5988,7 @@ static  void thumb42_0(u32 opcode)
 }
 
 // NEG Rd, Rs
-static  void thumb42_1(u32 opcode)
+static void ESPGBA_HOT thumb42_1(u32 opcode)
 {
   int dest = opcode & 7;
   int source = (opcode >> 3) & 7;
@@ -5520,7 +5996,7 @@ static  void thumb42_1(u32 opcode)
 }
 
 // CMP Rd, Rs
-static  void thumb42_2(u32 opcode)
+static void ESPGBA_HOT thumb42_2(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[(opcode >> 3)&7].I;
@@ -5528,7 +6004,7 @@ static  void thumb42_2(u32 opcode)
 }
 
 // CMN Rd, Rs
-static  void thumb42_3(u32 opcode)
+static void ESPGBA_HOT thumb42_3(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[(opcode >> 3)&7].I;
@@ -5536,7 +6012,7 @@ static  void thumb42_3(u32 opcode)
 }
 
 // ORR Rd, Rs
-static  void thumb43_0(u32 opcode)
+static void ESPGBA_HOT thumb43_0(u32 opcode)
 {
   int dest = opcode & 7;
   bus.reg[dest].I |= bus.reg[(opcode >> 3) & 7].I;
@@ -5545,7 +6021,7 @@ static  void thumb43_0(u32 opcode)
 }
 
 // MUL Rd, Rs
-static  void thumb43_1(u32 opcode)
+static void ESPGBA_HOT thumb43_1(u32 opcode)
 {
   clockTicks = 1;
   int dest = opcode & 7;
@@ -5568,7 +6044,7 @@ static  void thumb43_1(u32 opcode)
 }
 
 // BIC Rd, Rs
-static  void thumb43_2(u32 opcode)
+static void ESPGBA_HOT thumb43_2(u32 opcode)
 {
   int dest = opcode & 7;
   bus.reg[dest].I &= (~bus.reg[(opcode >> 3) & 7].I);
@@ -5577,7 +6053,7 @@ static  void thumb43_2(u32 opcode)
 }
 
 // MVN Rd, Rs
-static  void thumb43_3(u32 opcode)
+static void ESPGBA_HOT thumb43_3(u32 opcode)
 {
   int dest = opcode & 7;
   bus.reg[dest].I = ~bus.reg[(opcode >> 3) & 7].I;
@@ -5588,13 +6064,13 @@ static  void thumb43_3(u32 opcode)
 // High-register instructions and BX //////////////////////////////////////
 
 // ADD Rd, Hs
-static  void thumb44_1(u32 opcode)
+static void ESPGBA_HOT thumb44_1(u32 opcode)
 {
   bus.reg[opcode&7].I += bus.reg[((opcode>>3)&7)+8].I;
 }
 
 // ADD Hd, Rs
-static  void thumb44_2(u32 opcode)
+static void ESPGBA_HOT thumb44_2(u32 opcode)
 {
   bus.reg[(opcode&7)+8].I += bus.reg[(opcode>>3)&7].I;
   if((opcode&7) == 7) {
@@ -5607,7 +6083,7 @@ static  void thumb44_2(u32 opcode)
 }
 
 // ADD Hd, Hs
-static  void thumb44_3(u32 opcode)
+static void ESPGBA_HOT thumb44_3(u32 opcode)
 {
   bus.reg[(opcode&7)+8].I += bus.reg[((opcode>>3)&7)+8].I;
   if((opcode&7) == 7) {
@@ -5620,7 +6096,7 @@ static  void thumb44_3(u32 opcode)
 }
 
 // CMP Rd, Hs
-static  void thumb45_1(u32 opcode)
+static void ESPGBA_HOT thumb45_1(u32 opcode)
 {
   int dest = opcode & 7;
   u32 value = bus.reg[((opcode>>3)&7)+8].I;
@@ -5628,7 +6104,7 @@ static  void thumb45_1(u32 opcode)
 }
 
 // CMP Hd, Rs
-static  void thumb45_2(u32 opcode)
+static void ESPGBA_HOT thumb45_2(u32 opcode)
 {
   int dest = (opcode & 7) + 8;
   u32 value = bus.reg[(opcode>>3)&7].I;
@@ -5636,7 +6112,7 @@ static  void thumb45_2(u32 opcode)
 }
 
 // CMP Hd, Hs
-static  void thumb45_3(u32 opcode)
+static void ESPGBA_HOT thumb45_3(u32 opcode)
 {
   int dest = (opcode & 7) + 8;
   u32 value = bus.reg[((opcode>>3)&7)+8].I;
@@ -5644,7 +6120,7 @@ static  void thumb45_3(u32 opcode)
 }
 
 // MOV Rd, Rs
-static  void thumb46_0(u32 opcode)
+static void ESPGBA_HOT thumb46_0(u32 opcode)
 {
   bus.reg[opcode&7].I = bus.reg[((opcode>>3)&7)].I;
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
@@ -5652,14 +6128,14 @@ static  void thumb46_0(u32 opcode)
 
 
 // MOV Rd, Hs
-static  void thumb46_1(u32 opcode)
+static void ESPGBA_HOT thumb46_1(u32 opcode)
 {
   bus.reg[opcode&7].I = bus.reg[((opcode>>3)&7)+8].I;
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
 }
 
 // MOV Hd, Rs
-static  void thumb46_2(u32 opcode)
+static void ESPGBA_HOT thumb46_2(u32 opcode)
 {
   bus.reg[(opcode&7)+8].I = bus.reg[(opcode>>3)&7].I;
   if((opcode&7) == 7) {
@@ -5672,7 +6148,7 @@ static  void thumb46_2(u32 opcode)
 }
 
 // MOV Hd, Hs
-static  void thumb46_3(u32 opcode)
+static void ESPGBA_HOT thumb46_3(u32 opcode)
 {
   bus.reg[(opcode&7)+8].I = bus.reg[((opcode>>3)&7)+8].I;
   if((opcode&7) == 7) {
@@ -5686,7 +6162,7 @@ static  void thumb46_3(u32 opcode)
 
 
 // BX Rs
-static  void thumb47(u32 opcode)
+static void ESPGBA_HOT thumb47(u32 opcode)
 {
 	int base = (opcode >> 3) & 15;
 	bus.busPrefetchCount=0;
@@ -5712,7 +6188,7 @@ static  void thumb47(u32 opcode)
 // Load/store instructions ////////////////////////////////////////////////
 
 // LDR R0~R7,[PC, #Imm]
-static  void thumb48(u32 opcode)
+static void ESPGBA_HOT thumb48(u32 opcode)
 {
 	u8 regist = (opcode >> 8) & 7;
 	if (bus.busPrefetchCount == 0)
@@ -5726,7 +6202,7 @@ static  void thumb48(u32 opcode)
 }
 
 // STR Rd, [Rs, Rn]
-static  void thumb50(u32 opcode)
+static void ESPGBA_HOT thumb50(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5738,7 +6214,7 @@ static  void thumb50(u32 opcode)
 }
 
 // STRH Rd, [Rs, Rn]
-static  void thumb52(u32 opcode)
+static void ESPGBA_HOT thumb52(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5750,7 +6226,7 @@ static  void thumb52(u32 opcode)
 }
 
 // STRB Rd, [Rs, Rn]
-static  void thumb54(u32 opcode)
+static void ESPGBA_HOT thumb54(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5762,7 +6238,7 @@ static  void thumb54(u32 opcode)
 }
 
 // LDSB Rd, [Rs, Rn]
-static  void thumb56(u32 opcode)
+static void ESPGBA_HOT thumb56(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5774,7 +6250,7 @@ static  void thumb56(u32 opcode)
 }
 
 // LDR Rd, [Rs, Rn]
-static  void thumb58(u32 opcode)
+static void ESPGBA_HOT thumb58(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5786,7 +6262,7 @@ static  void thumb58(u32 opcode)
 }
 
 // LDRH Rd, [Rs, Rn]
-static  void thumb5A(u32 opcode)
+static void ESPGBA_HOT thumb5A(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5798,7 +6274,7 @@ static  void thumb5A(u32 opcode)
 }
 
 // LDRB Rd, [Rs, Rn]
-static  void thumb5C(u32 opcode)
+static void ESPGBA_HOT thumb5C(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5810,7 +6286,7 @@ static  void thumb5C(u32 opcode)
 }
 
 // LDSH Rd, [Rs, Rn]
-static  void thumb5E(u32 opcode)
+static void ESPGBA_HOT thumb5E(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5822,7 +6298,7 @@ static  void thumb5E(u32 opcode)
 }
 
 // STR Rd, [Rs, #Imm]
-static  void thumb60(u32 opcode)
+static void ESPGBA_HOT thumb60(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5834,7 +6310,7 @@ static  void thumb60(u32 opcode)
 }
 
 // LDR Rd, [Rs, #Imm]
-static  void thumb68(u32 opcode)
+static void ESPGBA_HOT thumb68(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5846,7 +6322,7 @@ static  void thumb68(u32 opcode)
 }
 
 // STRB Rd, [Rs, #Imm]
-static  void thumb70(u32 opcode)
+static void ESPGBA_HOT thumb70(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5858,7 +6334,7 @@ static  void thumb70(u32 opcode)
 }
 
 // LDRB Rd, [Rs, #Imm]
-static  void thumb78(u32 opcode)
+static void ESPGBA_HOT thumb78(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5870,7 +6346,7 @@ static  void thumb78(u32 opcode)
 }
 
 // STRH Rd, [Rs, #Imm]
-static  void thumb80(u32 opcode)
+static void ESPGBA_HOT thumb80(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5882,7 +6358,7 @@ static  void thumb80(u32 opcode)
 }
 
 // LDRH Rd, [Rs, #Imm]
-static  void thumb88(u32 opcode)
+static void ESPGBA_HOT thumb88(u32 opcode)
 {
 	if (bus.busPrefetchCount == 0)
 		bus.busPrefetch = bus.busPrefetchEnable;
@@ -5894,7 +6370,7 @@ static  void thumb88(u32 opcode)
 }
 
 // STR R0~R7, [SP, #Imm]
-static  void thumb90(u32 opcode)
+static void ESPGBA_HOT thumb90(u32 opcode)
 {
 	u8 regist = (opcode >> 8) & 7;
 	if (bus.busPrefetchCount == 0)
@@ -5907,7 +6383,7 @@ static  void thumb90(u32 opcode)
 }
 
 // LDR R0~R7, [SP, #Imm]
-static  void thumb98(u32 opcode)
+static void ESPGBA_HOT thumb98(u32 opcode)
 {
 	u8 regist = (opcode >> 8) & 7;
 	if (bus.busPrefetchCount == 0)
@@ -5922,7 +6398,7 @@ static  void thumb98(u32 opcode)
 // PC/stack-related ///////////////////////////////////////////////////////
 
 // ADD R0~R7, PC, Imm
-static  void thumbA0(u32 opcode)
+static void ESPGBA_HOT thumbA0(u32 opcode)
 {
   u8 regist = (opcode >> 8) & 7;
   bus.reg[regist].I = (bus.reg[15].I & 0xFFFFFFFC) + ((opcode&255)<<2);
@@ -5930,7 +6406,7 @@ static  void thumbA0(u32 opcode)
 }
 
 // ADD R0~R7, SP, Imm
-static  void thumbA8(u32 opcode)
+static void ESPGBA_HOT thumbA8(u32 opcode)
 {
   u8 regist = (opcode >> 8) & 7;
   bus.reg[regist].I = bus.reg[13].I + ((opcode&255)<<2);
@@ -5938,7 +6414,7 @@ static  void thumbA8(u32 opcode)
 }
 
 // ADD SP, Imm
-static  void thumbB0(u32 opcode)
+static void ESPGBA_HOT thumbB0(u32 opcode)
 {
   int offset = (opcode & 127) << 2;
   if(opcode & 0x80)
@@ -5970,7 +6446,7 @@ static  void thumbB0(u32 opcode)
   }
 
 // PUSH {Rlist}
-static  void thumbB4(u32 opcode)
+static void ESPGBA_HOT thumbB4(u32 opcode)
 {
   if (bus.busPrefetchCount == 0)
     bus.busPrefetch = bus.busPrefetchEnable;
@@ -5990,7 +6466,7 @@ static  void thumbB4(u32 opcode)
 }
 
 // PUSH {Rlist, LR}
-static  void thumbB5(u32 opcode)
+static void ESPGBA_HOT thumbB5(u32 opcode)
 {
   if (bus.busPrefetchCount == 0)
     bus.busPrefetch = bus.busPrefetchEnable;
@@ -6011,7 +6487,7 @@ static  void thumbB5(u32 opcode)
 }
 
 // POP {Rlist}
-static  void thumbBC(u32 opcode)
+static void ESPGBA_HOT thumbBC(u32 opcode)
 {
   if (bus.busPrefetchCount == 0)
     bus.busPrefetch = bus.busPrefetchEnable;
@@ -6031,7 +6507,7 @@ static  void thumbBC(u32 opcode)
 }
 
 // POP {Rlist, PC}
-static  void thumbBD(u32 opcode)
+static void ESPGBA_HOT thumbBD(u32 opcode)
 {
   if (bus.busPrefetchCount == 0)
     bus.busPrefetch = bus.busPrefetchEnable;
@@ -6083,7 +6559,7 @@ static  void thumbBD(u32 opcode)
   }
 
 // STM R0~7!, {Rlist}
-static  void thumbC0(u32 opcode)
+static void ESPGBA_HOT thumbC0(u32 opcode)
 {
   u8 regist = (opcode >> 8) & 7;
   if (bus.busPrefetchCount == 0)
@@ -6104,7 +6580,7 @@ static  void thumbC0(u32 opcode)
 }
 
 // LDM R0~R7!, {Rlist}
-static  void thumbC8(u32 opcode)
+static void ESPGBA_HOT thumbC8(u32 opcode)
 {
   u8 regist = (opcode >> 8) & 7;
   if (bus.busPrefetchCount == 0)
@@ -6129,7 +6605,7 @@ static  void thumbC8(u32 opcode)
 // Conditional branches ///////////////////////////////////////////////////
 
 // BEQ offset
-static  void thumbD0(u32 opcode)
+static void ESPGBA_HOT thumbD0(u32 opcode)
 {
 #if !USE_TWEAK_SPEEDHACK
 	clockTicks = CLOCKTICKS_UPDATE_TYPE16;
@@ -6150,7 +6626,7 @@ static  void thumbD0(u32 opcode)
 }
 
 // BNE offset
-static  void thumbD1(u32 opcode)
+static void ESPGBA_HOT thumbD1(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(!Z_FLAG) {
@@ -6164,7 +6640,7 @@ static  void thumbD1(u32 opcode)
 }
 
 // BCS offset
-static  void thumbD2(u32 opcode)
+static void ESPGBA_HOT thumbD2(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(C_FLAG) {
@@ -6178,7 +6654,7 @@ static  void thumbD2(u32 opcode)
 }
 
 // BCC offset
-static  void thumbD3(u32 opcode)
+static void ESPGBA_HOT thumbD3(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(!C_FLAG) {
@@ -6192,7 +6668,7 @@ static  void thumbD3(u32 opcode)
 }
 
 // BMI offset
-static  void thumbD4(u32 opcode)
+static void ESPGBA_HOT thumbD4(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(N_FLAG) {
@@ -6206,7 +6682,7 @@ static  void thumbD4(u32 opcode)
 }
 
 // BPL offset
-static  void thumbD5(u32 opcode)
+static void ESPGBA_HOT thumbD5(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(!N_FLAG) {
@@ -6220,7 +6696,7 @@ static  void thumbD5(u32 opcode)
 }
 
 // BVS offset
-static  void thumbD6(u32 opcode)
+static void ESPGBA_HOT thumbD6(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(V_FLAG) {
@@ -6234,7 +6710,7 @@ static  void thumbD6(u32 opcode)
 }
 
 // BVC offset
-static  void thumbD7(u32 opcode)
+static void ESPGBA_HOT thumbD7(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(!V_FLAG) {
@@ -6248,7 +6724,7 @@ static  void thumbD7(u32 opcode)
 }
 
 // BHI offset
-static  void thumbD8(u32 opcode)
+static void ESPGBA_HOT thumbD8(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(C_FLAG && !Z_FLAG) {
@@ -6262,7 +6738,7 @@ static  void thumbD8(u32 opcode)
 }
 
 // BLS offset
-static  void thumbD9(u32 opcode)
+static void ESPGBA_HOT thumbD9(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(!C_FLAG || Z_FLAG) {
@@ -6276,7 +6752,7 @@ static  void thumbD9(u32 opcode)
 }
 
 // BGE offset
-static  void thumbDA(u32 opcode)
+static void ESPGBA_HOT thumbDA(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(N_FLAG == V_FLAG) {
@@ -6290,7 +6766,7 @@ static  void thumbDA(u32 opcode)
 }
 
 // BLT offset
-static  void thumbDB(u32 opcode)
+static void ESPGBA_HOT thumbDB(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(N_FLAG != V_FLAG) {
@@ -6304,7 +6780,7 @@ static  void thumbDB(u32 opcode)
 }
 
 // BGT offset
-static  void thumbDC(u32 opcode)
+static void ESPGBA_HOT thumbDC(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(!Z_FLAG && (N_FLAG == V_FLAG)) {
@@ -6318,7 +6794,7 @@ static  void thumbDC(u32 opcode)
 }
 
 // BLE offset
-static  void thumbDD(u32 opcode)
+static void ESPGBA_HOT thumbDD(u32 opcode)
 {
   clockTicks = CLOCKTICKS_UPDATE_TYPE16;
   if(Z_FLAG || (N_FLAG != V_FLAG)) {
@@ -6334,7 +6810,7 @@ static  void thumbDD(u32 opcode)
 // SWI, B, BL /////////////////////////////////////////////////////////////
 
 // SWI #comment
-static  void thumbDF(u32 opcode)
+static void ESPGBA_HOT thumbDF(u32 opcode)
 {
   clockTicks = 3;
   bus.busPrefetchCount=0;
@@ -6342,7 +6818,7 @@ static  void thumbDF(u32 opcode)
 }
 
 // B offset
-static  void thumbE0(u32 opcode)
+static void ESPGBA_HOT thumbE0(u32 opcode)
 {
   int offset = (opcode & 0x3FF) << 1;
   if(opcode & 0x0400)
@@ -6356,7 +6832,7 @@ static  void thumbE0(u32 opcode)
 }
 
 // BLL #offset (forward)
-static  void thumbF0(u32 opcode)
+static void ESPGBA_HOT thumbF0(u32 opcode)
 {
   int offset = (opcode & 0x7FF);
   bus.reg[14].I = bus.reg[15].I + (offset << 12);
@@ -6364,7 +6840,7 @@ static  void thumbF0(u32 opcode)
 }
 
 // BLL #offset (backward)
-static  void thumbF4(u32 opcode)
+static void ESPGBA_HOT thumbF4(u32 opcode)
 {
   int offset = (opcode & 0x7FF);
   bus.reg[14].I = bus.reg[15].I + ((offset << 12) | 0xFF800000);
@@ -6372,7 +6848,7 @@ static  void thumbF4(u32 opcode)
 }
 
 // BLH #offset
-static  void thumbF8(u32 opcode)
+static void ESPGBA_HOT thumbF8(u32 opcode)
 {
   int offset = (opcode & 0x7FF);
   u32 temp = bus.reg[15].I-2;
@@ -6562,6 +7038,13 @@ static int thumbExecute (void)
       THUMB_PREFETCH_NEXT;
 
       (*thumbInsnTable[opcode>>6])(opcode);
+#ifdef ESP_PLATFORM
+      espgba_insns++;
+      if (++espgba_hot_tick >= 64) {
+         espgba_hot_tick = 0;
+         espgba_hotpc_record(oldArmNextPC, 0);
+      }
+#endif
 
       ct = clockTicks;
 
@@ -6573,6 +7056,20 @@ static int thumbExecute (void)
          clockTicks = codeTicksAccessSeq16(oldArmNextPC) + 1;
 
       cpuTotalTicks += clockTicks;
+#ifdef ESP_PLATFORM
+      if (bus.armNextPC == espgba_idle_pc)
+         cpuTotalTicks = cpuNextEvent;
+      if (bus.armNextPC == espgba_probe_pc)
+         espgba_probe_hits++;
+      if (bus.armNextPC == espgba_hle_pc || bus.armNextPC == espgba_hle_pc2) {
+         /* About to enter SoundMainRAM: run it natively instead. On success
+          * the PC/pipeline point at the return address and the do-while
+          * simply continues there; on bail the interpreter runs the
+          * original code, bit for bit. */
+         if (espgba_m4a_native())
+            cpuTotalTicks += 256;
+      }
+#endif
 
 
       test = cpuTotalTicks < cpuNextEvent && !armState && !holdState;
@@ -6751,13 +7248,17 @@ static inline void gfxDrawTileClipped(const TileLine &tileLine, u32* _line, cons
 }
 
 template<TileReader readTile, int layer, int renderer_idx>
-static void gfxDrawTextScreen(u16 control, u16 hofs, u16 vofs)
+static void ESPGBA_HOT gfxDrawTextScreen(u16 control, u16 hofs, u16 vofs)
 {
 	INIT_RENDERER_CONTEXT(renderer_idx);
 
    u16 *palette = (u16 *)RENDERER_PALETTE;
-   u8 *charBase = &vram[((control >> 2) & 0x03) * 0x4000];
-   u16 *screenBase = (u16 *)&vram[((control >> 8) & 0x1f) * 0x800];
+   /* BG char/map data lives entirely in VRAM's first 64KB; read it from the
+    * internal mirror when the port provides one -- tile fetches are the
+    * hottest reads in the whole emulator and PSRAM stalls dominate them. */
+   u8 *vbg = espgba_vram_bg ? espgba_vram_bg : vram;
+   u8 *charBase = &vbg[((control >> 2) & 0x03) * 0x4000];
+   u16 *screenBase = (u16 *)&vbg[((control >> 8) & 0x1f) * 0x800];
    u32 prio = ((control & 3)<<25) + 0x1000000;
    int sizeX = 256;
    int sizeY = 256;
@@ -6872,6 +7373,10 @@ void gfxDrawTextScreen(u16 control, u16 hofs, u16 vofs)
 template<int layer, int renderer_idx>
 static inline void gfxDrawTextScreen(u16 control, u16 hofs, u16 vofs)
 {
+  /* Upstream forgot this in the THREADED_RENDERER path: the function uses
+   * RENDERER_* macros, which resolve through renderer_ctx, but never declared
+   * it. Expands to a harmless `0` in the non-threaded build. */
+  INIT_RENDERER_CONTEXT(renderer_idx);
   u16 *palette = (u16 *)RENDERER_PALETTE;
   u8 *charBase = &vram[((control >> 2) & 0x03) * 0x4000];
   u16 *screenBase = (u16 *)&vram[((control >> 8) & 0x1f) * 0x800];
@@ -7643,7 +8148,7 @@ static INLINE void gfxDrawRotScreen16Bit160(int& currentX, int& currentY, int ch
    has been reached. */
 
 template<int renderer_idx>
-static void gfxDrawSprites (void)
+static void ESPGBA_HOT gfxDrawSprites (void)
 {
 	INIT_RENDERER_CONTEXT(renderer_idx);
 
@@ -7656,6 +8161,43 @@ static void gfxDrawSprites (void)
 	u16 *spritePalette = &((u16 *)RENDERER_PALETTE)[256];
 	int mosaicY = ((RENDERER_MOSAIC & 0xF000)>>12) + 1;
 	int mosaicX = ((RENDERER_MOSAIC & 0xF00)>>8) + 1;
+
+	/* Per-frame sprite Y prescan. Iterating all 128 OAM entries with full
+	 * attribute/size decode EVERY LINE cost ~10% of a core; instead cache
+	 * each sprite's y origin and effective height once per frame and reject
+	 * per line with u8 wraparound math -- (u8)(VCOUNT - sy) >= fieldY is
+	 * exactly the hardware test including the 256 wrap. Entered sprites run
+	 * the original, untouched decode below. */
+	static u8 sprY[128], sprFieldY[128];
+	static int sprLastVc = 1000;
+	{
+		int vc = RENDERER_R_VCOUNT;
+		if (vc < sprLastVc) {
+			const u16 *o = (const u16 *)RENDERER_OAM;
+			bool objwinOn = RENDERER_R_DISPCNT_OBJ_Window_Display != 0;
+			for (int i = 0; i < 128; i++, o += 4) {
+				u16 a0 = READ16LE(&o[0]);
+				u16 a1 = READ16LE(&o[1]);
+				if ((a0 & 0x0c00) == 0x0c00) a0 &= 0xF3FF;
+				u32 sizeY = 8 << (a1 >> 14);
+				u16 shape = a0 >> 14;
+				if (shape == 3) { a0 &= 0x3FFF; }
+				if (shape & 1) { if (sizeY > 8) sizeY >>= 1; }
+				else if (shape & 2) { if (sizeY < 32) sizeY <<= 1; }
+				/* objwin sprite with objwin off, or disabled non-affine */
+				if ((((a0 & 0x0c00) == 0x0800) && !objwinOn) ||
+				    ((a0 & 0x0300) == 0x0200)) {
+					sprFieldY[i] = 0;
+					continue;
+				}
+				if ((a0 & 0x0300) == 0x0300) sizeY <<= 1; /* affine double */
+				sprY[i] = (u8)(a0 & 255);
+				sprFieldY[i] = (u8)sizeY;
+			}
+		}
+		sprLastVc = vc;
+	}
+
 	for(u32 x = 0; x < 128; x++)
 	{
 		u16 a0 = READ16LE(sprites++);
@@ -7668,6 +8210,10 @@ static void gfxDrawSprites (void)
 		lineOBJpix-=2;
 		if (lineOBJpix<=0)
 			return;
+
+		/* Fast line rejection from the per-frame prescan. */
+		if ((u8)(RENDERER_R_VCOUNT - sprY[x]) >= sprFieldY[x])
+			continue;
 
 		if ((a0 & 0x0c00) == 0x0c00)
 			a0 &=0xF3FF;
@@ -8101,7 +8647,7 @@ static void gfxDrawSprites (void)
 }
 
 template<int renderer_idx>
-static void gfxDrawOBJWin (void)
+static void ESPGBA_HOT gfxDrawOBJWin (void)
 {
 	INIT_RENDERER_CONTEXT(renderer_idx);
 
@@ -8991,7 +9537,10 @@ bool CPUSetupBuffers(void)
 	memset(paletteRAM, 1, 0x400);
 	memset(vram, 1, 0x20000);
 	memset(oam, 1, 0x400);
-	memset(pix, 1, 4 * PIX_BUFFER_SCREEN_WIDTH * 160);
+	/* 2, not upstream's 4: the buffer is u16 RGB565 only and the ESP32 port
+	 * allocates it at exactly 2*256*160 in internal SRAM -- the legacy 4x
+	 * (XRGB8888-era) memset would overrun it by 80KB. */
+	memset(pix, 1, 2 * PIX_BUFFER_SCREEN_WIDTH * 160);
 	memset(ioMem, 1, 0x400);
 
 	if(rom == NULL || workRAM == NULL || bios == NULL ||
@@ -9208,19 +9757,26 @@ void doMirroring (bool b)
 void ThreadedRendererStart(void)
 {
    int u;
+   if (threaded_renderer_contexts == NULL) {
+      threaded_renderer_contexts = (renderer_context *)heap_caps_calloc(
+          THREADED_RENDERER_COUNT, sizeof(renderer_context),
+          MALLOC_CAP_SPIRAM);
+      if (threaded_renderer_contexts == NULL) {
+         threaded_renderer_contexts = (renderer_context *)calloc(
+             THREADED_RENDERER_COUNT, sizeof(renderer_context));
+      }
+      threaded_ctx_active = &threaded_renderer_contexts[0];
+   }
 	for(u = 0; u < THREADED_RENDERER_COUNT; ++u)
    {
       init_renderer_context(threaded_renderer_contexts[u]);
       threaded_renderer_contexts[u].renderer_control = 1;
-
-      threaded_renderer_contexts[u].renderer_thread_id =
-         thread_run((u == 0) ? threaded_renderer_loop0 : threaded_renderer_loop, reinterpret_cast<void*>(intptr_t(u)),
-#if VITA
-               (u == 0) ? THREAD_PRIORITY_NORMAL : THREAD_PRIORITY_LOW);
-#else
-      THREAD_PRIORITY_NORMAL);
-#endif
    }
+   /* One worker services the whole ring; the slots are a queue, not threads. */
+   threaded_renderer_contexts[0].renderer_thread_id =
+      thread_run(threaded_renderer_loop0, reinterpret_cast<void*>(intptr_t(0)),
+                 THREAD_PRIORITY_NORMAL);
+   (void)threaded_renderer_loop; /* multi-thread variant kept for reference */
 }
 
 void ThreadedRendererStop(void)
@@ -9245,7 +9801,7 @@ _join:;
 #endif
 
 template<int renderer_idx>
-static void mode0RenderLine (void)
+static void ESPGBA_HOT mode0RenderLine (void)
 {
 	INIT_RENDERER_CONTEXT(renderer_idx);
 
@@ -9259,6 +9815,8 @@ static void mode0RenderLine (void)
 
 	uint32_t backdrop = RENDERER_BACKDROP;
 
+	{
+	PROF_BEGIN();
 	if(RENDERER_R_DISPCNT_Screen_Display_BG0) {
 		gfxDrawTextScreen<Layer_BG0, renderer_idx>(RENDERER_IO_REGISTERS[REG_BG0CNT], RENDERER_IO_REGISTERS[REG_BG0HOFS], RENDERER_IO_REGISTERS[REG_BG0VOFS]);
 	}
@@ -9274,7 +9832,10 @@ static void mode0RenderLine (void)
 	if(RENDERER_R_DISPCNT_Screen_Display_BG3) {
 		gfxDrawTextScreen<Layer_BG3, renderer_idx>(RENDERER_IO_REGISTERS[REG_BG3CNT], RENDERER_IO_REGISTERS[REG_BG3HOFS], RENDERER_IO_REGISTERS[REG_BG3VOFS]);
 	}
+	PROF_END(5);  /* mode0: the four BG tile passes */
+	}
 
+	PROF_BEGIN();
 	for(int x = 0; x < 240; x++)
 	{
 		uint32_t color = backdrop;
@@ -9354,10 +9915,11 @@ static void mode0RenderLine (void)
 
 		lineMix[x] = CONVERT_COLOR(color);
 	}
+	PROF_END(6);  /* mode0: the per-pixel merge */
 }
 
 template<int renderer_idx>
-static void mode0RenderLineNoWindow (void)
+static void ESPGBA_HOT mode0RenderLineNoWindow (void)
 {
    int x;
 	INIT_RENDERER_CONTEXT(renderer_idx);
@@ -9511,7 +10073,7 @@ static void mode0RenderLineNoWindow (void)
 }
 
 template<int renderer_idx>
-static void mode0RenderLineAll (void)
+static void ESPGBA_HOT mode0RenderLineAll (void)
 {
 	INIT_RENDERER_CONTEXT(renderer_idx);
 
@@ -11296,13 +11858,13 @@ do { \
 	if(renderer_ctx.background_ver < threaded_background_ver) { \
 		renderer_ctx.background_ver = threaded_background_ver; \
 		if(!RENDERER_R_DISPCNT_Screen_Display_BG0) \
-			memset(renderer_ctx.line[Layer_BG0], -1, 240 * sizeof(u32)); \
+			memset(RENDERER_LINE[Layer_BG0], -1, 240 * sizeof(u32)); \
 		if(!RENDERER_R_DISPCNT_Screen_Display_BG1) \
-			memset(renderer_ctx.line[Layer_BG1], -1, 240 * sizeof(u32)); \
+			memset(RENDERER_LINE[Layer_BG1], -1, 240 * sizeof(u32)); \
 		if(!RENDERER_R_DISPCNT_Screen_Display_BG2) \
-			memset(renderer_ctx.line[Layer_BG2], -1, 240 * sizeof(u32)); \
+			memset(RENDERER_LINE[Layer_BG2], -1, 240 * sizeof(u32)); \
 		if(!RENDERER_R_DISPCNT_Screen_Display_BG3) \
-			memset(renderer_ctx.line[Layer_BG3], -1, 240 * sizeof(u32)); \
+			memset(RENDERER_LINE[Layer_BG3], -1, 240 * sizeof(u32)); \
 	} \
 	\
 	memset(RENDERER_LINE[Layer_OBJ], -1, 240 * sizeof(u32)); \
@@ -11318,23 +11880,67 @@ do { \
 	renderer_ctx.renderer_state = 0;\
 } while (0)
 
-static void threaded_renderer_loop0(void* p) {
-	int renderer_idx = 0;
-	INIT_RENDERER_CONTEXT(renderer_idx);
+/* Render one ring slot -- always through the <0> template instances; the
+ * slot is selected by threaded_ctx_active, so only ONE copy of the renderer
+ * code exists and the shared icache holds it. */
+static inline void threaded_render_slot(void) {
+	INIT_RENDERER_CONTEXT(0);
 
-	renderfunc_t drawSprites = gfxDrawSprites<0>;
-	renderfunc_t drawOBJWin = gfxDrawOBJWin<0>;
-	renderfunc_t (*getRenderFunc)(int, int) = GetRenderFunc<0>;
-
-	while(renderer_ctx.renderer_control == 1) {
-		if(threaded_renderer_ready) {
-			threaded_renderer_ready = 0;
-			systemDrawScreen();
-		}
-		threaded_renderer_loop_impl();
+	if(renderer_ctx.background_ver < threaded_background_ver) {
+		renderer_ctx.background_ver = threaded_background_ver;
+		if(!RENDERER_R_DISPCNT_Screen_Display_BG0)
+			memset(RENDERER_LINE[Layer_BG0], -1, 240 * sizeof(u32));
+		if(!RENDERER_R_DISPCNT_Screen_Display_BG1)
+			memset(RENDERER_LINE[Layer_BG1], -1, 240 * sizeof(u32));
+		if(!RENDERER_R_DISPCNT_Screen_Display_BG2)
+			memset(RENDERER_LINE[Layer_BG2], -1, 240 * sizeof(u32));
+		if(!RENDERER_R_DISPCNT_Screen_Display_BG3)
+			memset(RENDERER_LINE[Layer_BG3], -1, 240 * sizeof(u32));
 	}
 
-	renderer_ctx.renderer_control = 0; //loop is terminated.
+	{
+		PROF_BEGIN();
+		memset(RENDERER_LINE[Layer_OBJ], -1, 240 * sizeof(u32));
+		if(renderer_ctx.draw_sprites) gfxDrawSprites<0>();
+
+		if(renderer_ctx.renderfunc_type == 2) {
+			memset(RENDERER_LINE[Layer_WIN_OBJ], -1, 240 * sizeof(u32));
+			if(renderer_ctx.draw_objwin) gfxDrawOBJWin<0>();
+		}
+		PROF_END(3);  /* worker: sprite pass */
+	}
+	{
+		PROF_BEGIN();
+		GetRenderFunc<0>(renderer_ctx.renderfunc_mode, renderer_ctx.renderfunc_type)();
+		PROF_END(4);  /* worker: BG render + merge */
+	}
+}
+
+/* The single core-1 worker: consume ring slots in order; present the frame
+ * after the slot that carries scanline 159 has actually been rendered (the
+ * old code signalled present at HANDOFF, so the last line raced the blit). */
+static void threaded_renderer_ring(void* p) {
+	int j = 0;
+	while(threaded_renderer_contexts[0].renderer_control == 1) {
+		renderer_context& ctx = threaded_renderer_contexts[j];
+		if(!ctx.renderer_state) {
+			continue;  /* producer has not filled this slot yet */
+		}
+		threaded_ctx_active = &ctx;
+		threaded_render_slot();
+		int vc = ctx.vcount;
+		__sync_synchronize();
+		ctx.renderer_state = 0;
+		if(vc == 159) {
+			systemDrawScreen();
+		}
+		j = (j + 1) % THREADED_RENDERER_COUNT;
+	}
+	threaded_renderer_contexts[0].renderer_control = 0;
+}
+
+static void threaded_renderer_loop0(void* p) {
+	threaded_renderer_ring(p);
 }
 
 static void threaded_renderer_loop(void* p) {
@@ -11403,11 +12009,53 @@ static void fetchBackgroundOffset(int video_mode) {
 	}
 }
 
+/* Adaptive whole-frame drop.
+ *
+ * The renderer needs ~310us per line; the emulating core produces one every
+ * ~160us. A ring can only absorb the difference briefly -- once full, core 0
+ * used to spin-wait 60% of its life. Instead: decide at line 0 whether the
+ * worker is still busy with a previous frame; if so, drop THIS ENTIRE frame
+ * (coherent -- no torn half-frames) and let core 0 emulate at full speed.
+ * The picture updates whenever the worker finishes a complete frame, and the
+ * GAME runs as fast as the interpreter allows. Not a fixed frameskip: when
+ * the renderer keeps up (menus, dialogue), every frame is drawn. */
+static int threaded_frame_dropping = 0;
+extern "C" uint32_t espgba_frames_dropped;
+uint32_t espgba_frames_dropped = 0;
+
 static void postRender() {
 
 	int video_mode = R_DISPCNT_Video_Mode;
 	bool draw_objwin = (graphics.layerEnable & 0x9000) == 0x9000;
 	bool draw_sprites = R_DISPCNT_Screen_Display_OBJ;
+
+	{
+		/* Frame boundary = VCOUNT wrapped (this loop renders lines 1..159;
+		 * line 0 does not reliably reach here, so ==0 is not usable). The
+		 * vblank always lets the worker drain the tiny ring, so congestion
+		 * can only be detected DURING a frame -- when the producer is about
+		 * to spin, it flags the NEXT frame for dropping instead. Under
+		 * sustained load this alternates kept/dropped frames; when the
+		 * renderer keeps up, nothing is ever dropped. */
+		static int lastVcount = 1000;
+		static int dropNext = 0;
+		int vc = io_registers[REG_VCOUNT];
+		bool boundary = vc < lastVcount;
+		lastVcount = vc;
+		if(boundary) {
+			threaded_frame_dropping = dropNext;
+			dropNext = 0;
+			if(threaded_frame_dropping) espgba_frames_dropped++;
+		}
+		if(threaded_frame_dropping) {
+			return;
+		}
+		if(threaded_renderer_contexts[threaded_renderer_idx].renderer_state) {
+			/* Ring full: the renderer is behind. Pay the wait for THIS
+			 * frame's coherence, but sacrifice the next one. */
+			dropNext = 1;
+		}
+	}
 
 #if DEBUG_RENDERER_NOSYNC
 	if (threaded_renderer_contexts[threaded_renderer_idx].renderer_state) return;
@@ -11415,7 +12063,10 @@ static void postRender() {
 	while(threaded_renderer_contexts[threaded_renderer_idx].renderer_state);
 #endif
 
-	INIT_RENDERER_CONTEXT(threaded_renderer_idx);
+	/* Producer side: bind to the slot being FILLED, not the slot the worker
+	 * is rendering (INIT_RENDERER_CONTEXT now resolves to the worker's active
+	 * slot pointer). */
+	renderer_context& renderer_ctx = threaded_renderer_contexts[threaded_renderer_idx];
 
 	renderer_ctx.renderfunc_mode = renderfunc_mode;
 	renderer_ctx.renderfunc_type = renderfunc_type;
@@ -11473,23 +12124,8 @@ static void postRender() {
 	renderer_ctx.io_registers[REG_BLDALPHA] = io_registers[REG_BLDALPHA];
 	renderer_ctx.io_registers[REG_BLDY] = io_registers[REG_BLDY];
 
-	renderer_ctx.io_registers[REG_TM0D] = io_registers[REG_TM0D];
-	renderer_ctx.io_registers[REG_TM1D] = io_registers[REG_TM1D];
-	renderer_ctx.io_registers[REG_TM2D] = io_registers[REG_TM2D];
-	renderer_ctx.io_registers[REG_TM3D] = io_registers[REG_TM3D];
-
-	renderer_ctx.io_registers[REG_TM0CNT] = io_registers[REG_TM0CNT];
-	renderer_ctx.io_registers[REG_TM1CNT] = io_registers[REG_TM1CNT];
-	renderer_ctx.io_registers[REG_TM2CNT] = io_registers[REG_TM2CNT];
-	renderer_ctx.io_registers[REG_TM3CNT] = io_registers[REG_TM3CNT];
-
-	renderer_ctx.io_registers[REG_P1] = io_registers[REG_P1];
-	renderer_ctx.io_registers[REG_P1CNT] = io_registers[REG_P1CNT];
-	renderer_ctx.io_registers[REG_RCNT] = io_registers[REG_RCNT];
-	renderer_ctx.io_registers[REG_IE] = io_registers[REG_IE];
-	renderer_ctx.io_registers[REG_IF] = io_registers[REG_IF];
-	renderer_ctx.io_registers[REG_IME] = io_registers[REG_IME];
-	renderer_ctx.io_registers[REG_HALTCNT] = io_registers[REG_HALTCNT];
+	/* (Timer, P1, RCNT, IE, IF, IME, HALTCNT copies removed: the renderer
+	 * never reads them, and they no longer fit the 64-entry slot copy.) */
 
 	renderer_ctx.bg2c = gfxBG2Changed;
 	renderer_ctx.bg2x = gfxBG2X;
@@ -11525,13 +12161,387 @@ static void postRender() {
 	gfxBG2Changed = 0;
 	if(video_mode == 2)	gfxBG3Changed = 0;
 
-	//buffer is ready.
+	//buffer is ready. The fence keeps every field write above visible to the
+	//core-1 worker before the state flag flips (the flag is the handshake).
+	__sync_synchronize();
 	renderer_ctx.renderer_state = 1;
 
-	//notify screen is done.
-	if(renderer_ctx.vcount == 159) threaded_renderer_ready = 1;
+	/* Present is signalled by the WORKER after it renders the vcount==159
+	 * slot -- signalling here raced the render of the final line. */
 
 	threaded_renderer_idx = (threaded_renderer_idx + 1) % THREADED_RENDERER_COUNT;
+}
+
+/* ------------------------------------------------------------------------
+ * Fast mode-0 line renderer (painter's algorithm).
+ *
+ * The stock path renders every enabled BG into a u32 line buffer with packed
+ * priorities, then resolves priority per pixel across five buffers -- ~72k
+ * cycles per line, which caps the whole console at ~20 fps. This path covers
+ * the dominant case (mode 0, no alpha/window/mosaic -- the Pokemon overworld)
+ * by painting BGs back-to-front in priority order directly into a 555 line,
+ * skipping transparent pixels and entire blank tile rows, then overlaying
+ * sprites via a priority byte-map. Semi-transparent OBJ (shadows, fog) still
+ * alpha-blends with the painted background. Anything fancier falls back to
+ * the stock renderer for that line.
+ * ---------------------------------------------------------------------- */
+static u16 espgba_colLine[240];   /* 555 winners */
+static u8  espgba_prioLine[240];  /* winning BG priority, 0xFF = backdrop */
+
+static void ESPGBA_HOT fastPaintTextBG(u16 control, u16 hofs, u16 vofs,
+                                        u8 prio, int eightBpp)
+{
+	INIT_RENDERER_CONTEXT(0);
+	u16 *palette = (u16 *)RENDERER_PALETTE;
+	u8 *charBase = &vram[((control >> 2) & 0x03) * 0x4000];
+	u16 *screenBase = (u16 *)&vram[((control >> 8) & 0x1f) * 0x800];
+	int sizeX = 256;
+	int sizeY = 256;
+	switch ((control >> 14) & 3)
+	{
+		case 0: break;
+		case 1: sizeX = 512; break;
+		case 2: sizeY = 512; break;
+		case 3: sizeX = 512; sizeY = 512; break;
+	}
+	int maskX = sizeX - 1;
+	int maskY = sizeY - 1;
+
+	int xxx = hofs & maskX;
+	int yyy = (vofs + RENDERER_R_VCOUNT) & maskY;
+
+	if (yyy > 255 && sizeY > 256)
+	{
+		yyy &= 255;
+		screenBase += 0x400;
+		if (sizeX > 256) screenBase += 0x400;
+	}
+
+	int yshift = ((yyy >> 3) << 5);
+	u16 *screenSource = screenBase + 0x400 * (xxx >> 8) + ((xxx & 255) >> 3) + yshift;
+	int tileY = yyy & 7;
+
+	/* x = output pixel for the FIRST pixel of the current tile (may be
+	 * negative for the clipped leading tile). */
+	int x = -(xxx & 7);
+	while (x < 240)
+	{
+		TileEntry tile;
+		tile.val = READ16LE(screenSource);
+		int ty = tile.vFlip ? 7 - tileY : tileY;
+
+		/* Full tiles (x in [0, 232]) skip the per-pixel bounds check and the
+		 * per-pixel flip select; only the clipped edge tiles pay for them. */
+		bool fullTile = (unsigned)x <= 232u;
+
+		if (!eightBpp)
+		{
+			u32 row = *(const u32 *)(charBase + (tile.tileNum << 5) + (ty << 2));
+			if (row)
+			{
+				const u16 *pal = palette + (tile.palette << 4);
+				if (fullTile && !tile.hFlip)
+				{
+					u16 *cl = &espgba_colLine[x];
+					u8 *pl = &espgba_prioLine[x];
+					for (int k = 0; k < 8; k++, row >>= 4)
+					{
+						u32 nib = row & 15;
+						if (nib) { cl[k] = READ16LE(&pal[nib]); pl[k] = prio; }
+					}
+				}
+				else if (fullTile)
+				{
+					u16 *cl = &espgba_colLine[x];
+					u8 *pl = &espgba_prioLine[x];
+					for (int k = 7; k >= 0; k--, row >>= 4)
+					{
+						u32 nib = row & 15;
+						if (nib) { cl[k] = READ16LE(&pal[nib]); pl[k] = prio; }
+					}
+				}
+				else
+				{
+					for (int k = 0; k < 8; k++)
+					{
+						u32 nib = (row >> (k << 2)) & 15;
+						if (!nib) continue;
+						int px = x + (tile.hFlip ? 7 - k : k);
+						if ((unsigned)px >= 240u) continue;
+						espgba_colLine[px] = READ16LE(&pal[nib]);
+						espgba_prioLine[px] = prio;
+					}
+				}
+			}
+		}
+		else
+		{
+			const u8 *rowp = charBase + (tile.tileNum << 6) + (ty << 3);
+			if (fullTile)
+			{
+				u16 *cl = &espgba_colLine[x];
+				u8 *pl = &espgba_prioLine[x];
+				for (int k = 0; k < 8; k++)
+				{
+					u32 idx = rowp[tile.hFlip ? 7 - k : k];
+					if (idx) { cl[k] = READ16LE(&palette[idx]); pl[k] = prio; }
+				}
+			}
+			else
+			{
+				for (int k = 0; k < 8; k++)
+				{
+					u32 idx = rowp[k];
+					if (!idx) continue;
+					int px = x + (tile.hFlip ? 7 - k : k);
+					if ((unsigned)px >= 240u) continue;
+					espgba_colLine[px] = READ16LE(&palette[idx]);
+					espgba_prioLine[px] = prio;
+				}
+			}
+		}
+
+		screenSource++;
+		xxx += 8;
+		x += 8;
+		if (xxx == 256 && sizeX > 256)
+			screenSource = screenBase + 0x400 + yshift;
+		else if (xxx >= sizeX)
+		{
+			xxx = 0;
+			screenSource = screenBase + yshift;
+		}
+	}
+}
+
+static void ESPGBA_HOT mode0RenderLineFast (void)
+{
+	INIT_RENDERER_CONTEXT(0);
+	u16 *palette = (u16 *)RENDERER_PALETTE;
+	uint16_t *lineMix = GET_LINE_MIX;
+
+	const u16 cnt[4] = {
+		RENDERER_IO_REGISTERS[REG_BG0CNT], RENDERER_IO_REGISTERS[REG_BG1CNT],
+		RENDERER_IO_REGISTERS[REG_BG2CNT], RENDERER_IO_REGISTERS[REG_BG3CNT],
+	};
+	const u16 hofs[4] = {
+		RENDERER_IO_REGISTERS[REG_BG0HOFS], RENDERER_IO_REGISTERS[REG_BG1HOFS],
+		RENDERER_IO_REGISTERS[REG_BG2HOFS], RENDERER_IO_REGISTERS[REG_BG3HOFS],
+	};
+	const u16 vofs[4] = {
+		RENDERER_IO_REGISTERS[REG_BG0VOFS], RENDERER_IO_REGISTERS[REG_BG1VOFS],
+		RENDERER_IO_REGISTERS[REG_BG2VOFS], RENDERER_IO_REGISTERS[REG_BG3VOFS],
+	};
+	const bool on[4] = {
+		(RENDERER_GRAPHICS_LAYERS & (1 << 8)) != 0,
+		(RENDERER_GRAPHICS_LAYERS & (1 << 9)) != 0,
+		(RENDERER_GRAPHICS_LAYERS & (1 << 10)) != 0,
+		(RENDERER_GRAPHICS_LAYERS & (1 << 11)) != 0,
+	};
+
+	/* Mosaic on an enabled BG: rare; hand the line to the stock renderer. */
+	if ((on[0] && (cnt[0] & 0x40)) || (on[1] && (cnt[1] & 0x40)) ||
+	    (on[2] && (cnt[2] & 0x40)) || (on[3] && (cnt[3] & 0x40)))
+	{
+		mode0RenderLine<0>();
+		return;
+	}
+
+	/* Backdrop fill (555) + priority reset. */
+	{
+		u16 bd = READ16LE(&palette[0]);
+		u32 bd2 = ((u32)bd << 16) | bd;
+		u32 *c32 = (u32 *)espgba_colLine;
+		for (int i = 0; i < 120; i++) c32[i] = bd2;
+		memset(espgba_prioLine, 0xFF, 240);
+	}
+
+	/* BGs, lowest priority first; same priority resolves to higher BG index
+	 * first so lower-numbered BGs end up on top, as hardware does. */
+	for (int p = 3; p >= 0; p--)
+	{
+		for (int i = 3; i >= 0; i--)
+		{
+			if (!on[i] || (cnt[i] & 3) != (u16)p) continue;
+			fastPaintTextBG(cnt[i], hofs[i], vofs[i], (u8)p,
+			                (cnt[i] & 0x80) != 0);
+		}
+	}
+
+	/* Sprite overlay. The OBJ line buffer already carries per-pixel priority
+	 * (bits 25..26), the semi-transparency flag (bit 16) and 0x80000000 for
+	 * transparent. OBJ beats a BG of EQUAL priority. */
+	for (int x = 0; x < 240; x++)
+	{
+		u32 o = RENDERER_LINE[Layer_OBJ][x];
+		if (o & 0x80000000u) continue;
+		if ((u8)((o >> 25) & 3) > espgba_prioLine[x]) continue;
+		u32 color = o & 0xFFFF;
+		if (o & 0x00010000u)
+		{
+			u32 back = espgba_colLine[x];
+			GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F],
+			                coeff[(COLEV >> 8) & 0x1F]);
+		}
+		espgba_colLine[x] = (u16)color;
+	}
+
+	/* One conversion pass 555 -> panel byte order. */
+	for (int x = 0; x < 240; x++)
+		lineMix[x] = CONVERT_COLOR(espgba_colLine[x]);
+}
+
+/* Affine BG2 for the mode-1 painter: 8bpp rot/scale sampling into the
+ * 555 scratch line under the same priority rules as fastPaintTextBG.
+ * Reference handling (advance by PB/PD, changed/vcount-0 reload) mirrors
+ * gfxDrawRotScreen exactly -- including writing the advanced reference
+ * back to the slot, which the slow path does through its int& params. */
+static void ESPGBA_HOT fastPaintAffineBG2(void)
+{
+	INIT_RENDERER_CONTEXT(0);
+	u16 *palette = (u16 *)RENDERER_PALETTE;
+	const u16 control = RENDERER_IO_REGISTERS[REG_BG2CNT];
+	u8 *charBase = &vram[((control >> 2) & 0x03) << 14];
+	u8 *screenBase = (u8 *)&vram[((control >> 8) & 0x1f) << 11];
+	const u8 prio = (u8)(control & 3);
+	const u32 mapSize = (control >> 14) & 3;
+	const int size = 128 << mapSize;
+	const int mask = size - 1;
+	const int yshift = (int)mapSize + 4;
+
+	int dx = (s16)RENDERER_IO_REGISTERS[REG_BG2PA];
+	int dmx = (s16)RENDERER_IO_REGISTERS[REG_BG2PB];
+	int dy = (s16)RENDERER_IO_REGISTERS[REG_BG2PC];
+	int dmy = (s16)RENDERER_IO_REGISTERS[REG_BG2PD];
+
+	int changed = RENDERER_BG2C;
+	if (RENDERER_R_VCOUNT == 0)
+		changed = 3;
+	RENDERER_BG2X += dmx;
+	RENDERER_BG2Y += dmy;
+	if (changed & 1)
+	{
+		RENDERER_BG2X = RENDERER_BG2X_L | ((RENDERER_BG2X_H & 0x07FF) << 16);
+		if (RENDERER_BG2X_H & 0x0800)
+			RENDERER_BG2X |= 0xF8000000;
+	}
+	if (changed & 2)
+	{
+		RENDERER_BG2Y = RENDERER_BG2Y_L | ((RENDERER_BG2Y_H & 0x07FF) << 16);
+		if (RENDERER_BG2Y_H & 0x0800)
+			RENDERER_BG2Y |= 0xF8000000;
+	}
+	int realX = RENDERER_BG2X;
+	int realY = RENDERER_BG2Y;
+
+	if (control & 0x2000) /* wraparound */
+	{
+		for (int x = 0; x < 240; x++)
+		{
+			if (prio <= espgba_prioLine[x] || espgba_prioLine[x] == 0xFF)
+			{
+				unsigned xxx = ((unsigned)realX >> 8) & (unsigned)mask;
+				unsigned yyy = ((unsigned)realY >> 8) & (unsigned)mask;
+				unsigned tile = screenBase[(xxx >> 3) | ((yyy >> 3) << yshift)];
+				u8 color = charBase[(tile << 6) | ((yyy & 7) << 3) | (xxx & 7)];
+				if (color && prio <= espgba_prioLine[x])
+				{
+					espgba_colLine[x] = READ16LE(&palette[color]);
+					espgba_prioLine[x] = prio;
+				}
+			}
+			realX += dx;
+			realY += dy;
+		}
+	}
+	else
+	{
+		for (int x = 0; x < 240; x++)
+		{
+			int xxx = realX >> 8;
+			int yyy = realY >> 8;
+			if ((unsigned)xxx < (unsigned)size && (unsigned)yyy < (unsigned)size)
+			{
+				unsigned tile =
+				    screenBase[((unsigned)xxx >> 3) | (((unsigned)yyy >> 3) << yshift)];
+				u8 color = charBase[(tile << 6) | ((yyy & 7) << 3) | (xxx & 7)];
+				if (color && prio <= espgba_prioLine[x])
+				{
+					espgba_colLine[x] = READ16LE(&palette[color]);
+					espgba_prioLine[x] = prio;
+				}
+			}
+			realX += dx;
+			realY += dy;
+		}
+	}
+}
+
+/* Mode 1 painter: BG0/BG1 text (same pass as mode 0) + affine BG2 + OBJ.
+ * Gen-3 Pokemon overworlds run mode 1, which previously always fell to the
+ * slow template path -- the largest remaining renderer cost. */
+static void ESPGBA_HOT mode1RenderLineFast (void)
+{
+	INIT_RENDERER_CONTEXT(0);
+	u16 *palette = (u16 *)RENDERER_PALETTE;
+	uint16_t *lineMix = GET_LINE_MIX;
+
+	const u16 cnt[3] = {
+		RENDERER_IO_REGISTERS[REG_BG0CNT], RENDERER_IO_REGISTERS[REG_BG1CNT],
+		RENDERER_IO_REGISTERS[REG_BG2CNT],
+	};
+	const bool on[3] = {
+		(RENDERER_GRAPHICS_LAYERS & (1 << 8)) != 0,
+		(RENDERER_GRAPHICS_LAYERS & (1 << 9)) != 0,
+		(RENDERER_GRAPHICS_LAYERS & (1 << 10)) != 0,
+	};
+
+	if ((on[0] && (cnt[0] & 0x40)) || (on[1] && (cnt[1] & 0x40)) ||
+	    (on[2] && (cnt[2] & 0x40)))
+	{
+		mode1RenderLine<0>();
+		return;
+	}
+
+	{
+		u16 bd = READ16LE(&palette[0]);
+		u32 bd2 = ((u32)bd << 16) | bd;
+		u32 *c32 = (u32 *)espgba_colLine;
+		for (int i = 0; i < 120; i++) c32[i] = bd2;
+		memset(espgba_prioLine, 0xFF, 240);
+	}
+
+	for (int p = 3; p >= 0; p--)
+	{
+		if (on[2] && (cnt[2] & 3) == (u16)p)
+			fastPaintAffineBG2();
+		for (int i = 1; i >= 0; i--)
+		{
+			if (!on[i] || (cnt[i] & 3) != (u16)p) continue;
+			fastPaintTextBG(cnt[i],
+			                RENDERER_IO_REGISTERS[REG_BG0HOFS + i * 2],
+			                RENDERER_IO_REGISTERS[REG_BG0VOFS + i * 2],
+			                (u8)p, (cnt[i] & 0x80) != 0);
+		}
+	}
+
+	for (int x = 0; x < 240; x++)
+	{
+		u32 o = RENDERER_LINE[Layer_OBJ][x];
+		if (o & 0x80000000u) continue;
+		if ((u8)((o >> 25) & 3) > espgba_prioLine[x]) continue;
+		u32 color = o & 0xFFFF;
+		if (o & 0x00010000u)
+		{
+			u32 back = espgba_colLine[x];
+			GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F],
+			                coeff[(COLEV >> 8) & 0x1F]);
+		}
+		espgba_colLine[x] = (u16)color;
+	}
+
+	for (int x = 0; x < 240; x++)
+		lineMix[x] = CONVERT_COLOR(espgba_colLine[x]);
 }
 
 #endif
@@ -11549,10 +12559,22 @@ static void postRender() {
 template<int renderer_idx>
 inline renderfunc_t GetRenderFunc(int mode, int type) {
 	switch((mode << 4) | type) {
+#if THREADED_RENDERER
+		/* Painter's-algorithm fast path for the no-effects case; the ring
+		 * worker always renders through instance 0. */
+		case 0x00: return renderer_idx == 0 ? mode0RenderLineFast
+		                                    : mode0RenderLine<renderer_idx>;
+#else
 		case 0x00: return mode0RenderLine<renderer_idx>;
+#endif
 		case 0x01: return mode0RenderLineNoWindow<renderer_idx>;
 		case 0x02: return mode0RenderLineAll<renderer_idx>;
+#if THREADED_RENDERER
+		case 0x10: return renderer_idx == 0 ? mode1RenderLineFast
+		                                    : mode1RenderLine<renderer_idx>;
+#else
 		case 0x10: return mode1RenderLine<renderer_idx>;
+#endif
 		case 0x11: return mode1RenderLineNoWindow<renderer_idx>;
 		case 0x12: return mode1RenderLineAll<renderer_idx>;
 		case 0x20: return mode2RenderLine<renderer_idx>;
@@ -12634,7 +13656,13 @@ void CPUReset (void)
 	memset(&bus.reg[0], 0, sizeof(bus.reg));	// clean registers
 	memset(oam, 0, 0x400);				// clean OAM
 	memset(paletteRAM, 0, 0x400);		// clean palette
-	memset(pix, 0, 4 * 160 * 240);		// clean picture
+	/* 2 * stride, not the hardcoded "4 * 160 * 240" (=153600) this line
+	 * shipped with: the ESP32 port allocates pix at exactly
+	 * 2*PIX_BUFFER_SCREEN_WIDTH*160 = 81920 bytes in internal SRAM, and the
+	 * old constant zeroed 71KB past it -- straight over the SPI device struct
+	 * and the newlib UART lock. (Upstream never noticed because it
+	 * over-allocated pix 4x.) */
+	memset(pix, 0, 2 * PIX_BUFFER_SCREEN_WIDTH * 160);	// clean picture
 	memset(vram, 0, 0x20000);			// clean vram
 	memset(ioMem, 0, 0x400);			// clean io memory
 
@@ -12969,7 +13997,7 @@ void UpdateJoypad(void)
    }
 }
 
-void CPULoop (void)
+void ESPGBA_HOT CPULoop (void)
 {
 	bool framedone;
 	int timerOverflow = 0;
@@ -12991,13 +14019,21 @@ void CPULoop (void)
 		{
 			if(armState)
 			{
-				if (!armExecute())
+				PROF_BEGIN();
+				if (!armExecute()) {
+					PROF_END(2);
 					return;
+				}
+				PROF_END(2);  /* ARM execution -- slot 2 (apu is ~0 anyway) */
 			}
 			else
 			{
-				if (!thumbExecute())
+				PROF_BEGIN();
+				if (!thumbExecute()) {
+					PROF_END(0);
 					return;
+				}
+				PROF_END(0);
 			}
 			clockTicks = 0;
 		}
@@ -13122,8 +14158,16 @@ updateLoop:
 					if(fs_draw) {
 #endif
 #if THREADED_RENDERER
-						postRender();
+						{
+							/* PROF(1) under threading = handoff copy + spin
+							 * waiting for the core-1 worker, i.e. the price
+							 * core 0 still pays for rendering. */
+							PROF_BEGIN();
+							postRender();
+							PROF_END(1);
+						}
 #else
+						PROF_BEGIN();
 						bool draw_objwin = (graphics.layerEnable & 0x9000) == 0x9000;
 						bool draw_sprites = R_DISPCNT_Screen_Display_OBJ;
 
@@ -13136,6 +14180,7 @@ updateLoop:
 						}
 
 						GetRenderFunc<0>(renderfunc_mode, renderfunc_type)();
+						PROF_END(1);
 #endif
 #if USE_FRAME_SKIP
 					}
@@ -13160,7 +14205,9 @@ updateLoop:
 			soundTicks -= clockTicks;
 			if(!soundTicks)
 			{
+				PROF_BEGIN();
 				process_sound_tick_fn();
+				PROF_END(2);
 				soundTicks += SOUND_CLOCK_TICKS;
 			}
 

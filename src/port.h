@@ -27,7 +27,21 @@
 #define RED_SHIFT 11
 #define GREEN_SHIFT 5
 #define BLUE_SHIFT 0
+#ifdef PIX_BE_565
+/* Byte-swapped (big-endian) RGB565: the ESP32-S3 port DMA-blits `pix`
+ * straight to the SPI panel, which takes the high byte first. Emitting panel
+ * byte order at the final write removes a whole per-frame byteswap+copy pass.
+ * Field derivation (GBA color c = xBBBBBGGGGGRRRRR, out = 565 with bytes
+ * pre-swapped in the u16):
+ *   red   c[4:0]   -> out[7:3]
+ *   green c[9:7]   -> out[2:0], c[6:5] -> out[15:14], c[9] -> out[13]
+ *   blue  c[14:10] -> out[12:8]
+ * Verified: red 0x001F -> bytes F8 00, green 0x03E0 -> 07 E0,
+ * blue 0x7C00 -> 00 1F on the wire. */
+#define CONVERT_COLOR(color) (((color & 0x001f) << 3) | ((color & 0x0380) >> 7) | ((color & 0x0060) << 9) | ((color & 0x0200) << 4) | ((color & 0x7c00) >> 2))
+#else
 #define CONVERT_COLOR(color) (((color & 0x001f) << 11) | ((color & 0x03e0) << 1) | ((color & 0x0200) >> 4) | ((color & 0x7c00) >> 10))
+#endif
 #else
 /* 16bit color - RGB555 */
 #define RED_MASK  0x7c00

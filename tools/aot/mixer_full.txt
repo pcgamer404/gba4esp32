@@ -1,0 +1,436 @@
+# SoundMainRAM v2 listing (corrected segmentation), Emerald(J) live dump
+# entry 0x03001b51 THUMB, r0=SoundInfo; SoundMain's stack frame is live (sp+0x4..0x18 used)
+
+===== T 0x3001b50-0x3001b5c: entry: reverb check (r0=SoundInfo) =====
+0x03001b50  ldrb      r3, [r0, #5]
+0x03001b52  cmp       r3, #0
+0x03001b54  beq       #0x3001bb0
+0x03001b56  adr       r1, #4
+0x03001b58  bx        r1
+0x03001b5a  movs      r0, r0
+
+===== A 0x3001b5c-0x3001bb0: reverb pass =====
+0x03001b5c  cmp       r4, #2
+0x03001b60  addeq     r7, r0, #0x350
+0x03001b64  addne     r7, r5, r8
+0x03001b68  mov       r4, r8
+0x03001b6c  ldrsb     r0, [r5, r6]
+0x03001b70  ldrsb     r1, [r5]
+0x03001b74  add       r0, r0, r1
+0x03001b78  ldrsb     r1, [r7, r6]
+0x03001b7c  add       r0, r0, r1
+0x03001b80  ldrsb     r1, [r7], #1
+0x03001b84  add       r0, r0, r1
+0x03001b88  mul       r1, r0, r3
+0x03001b8c  asr       r0, r1, #9
+0x03001b90  tst       r0, #0x80
+0x03001b94  addne     r0, r0, #1
+0x03001b98  strb      r0, [r5, r6]
+0x03001b9c  strb      r0, [r5], #1
+0x03001ba0  subs      r4, r4, #1
+0x03001ba4  bgt       #0x3001b6c
+0x03001ba8  add       r0, pc, #0x2f
+0x03001bac  bx        r0
+
+===== T 0x3001bb0-0x3001bde: no-reverb zero-fill =====
+0x03001bb0  movs      r0, #0
+0x03001bb2  mov       r1, r8
+0x03001bb4  adds      r6, r6, r5
+0x03001bb6  lsrs      r1, r1, #3
+0x03001bb8  blo       #0x3001bbe
+0x03001bba  stm       r5!, {r0}
+0x03001bbc  stm       r6!, {r0}
+0x03001bbe  lsrs      r1, r1, #1
+0x03001bc0  blo       #0x3001bca
+0x03001bc2  stm       r5!, {r0}
+0x03001bc4  stm       r6!, {r0}
+0x03001bc6  stm       r5!, {r0}
+0x03001bc8  stm       r6!, {r0}
+0x03001bca  stm       r5!, {r0}
+0x03001bcc  stm       r6!, {r0}
+0x03001bce  stm       r5!, {r0}
+0x03001bd0  stm       r6!, {r0}
+0x03001bd2  stm       r5!, {r0}
+0x03001bd4  stm       r6!, {r0}
+0x03001bd6  stm       r5!, {r0}
+0x03001bd8  stm       r6!, {r0}
+0x03001bda  subs      r1, #1
+0x03001bdc  bgt       #0x3001bca
+
+===== T 0x3001bde-0x3001cec: channel loop + envelope state machine =====
+0x03001bde  ldr       r4, [sp, #0x18]
+0x03001be0  ldr       r0, [r4, #0x18]
+0x03001be2  mov       ip, r0
+0x03001be4  ldrb      r0, [r4, #6]
+0x03001be6  adds      r4, #0x50
+0x03001be8  str       r0, [sp, #4]
+0x03001bea  ldr       r3, [r4, #0x24]
+0x03001bec  ldr       r0, [sp, #0x14]
+0x03001bee  cmp       r0, #0
+0x03001bf0  beq       #0x3001c08
+0x03001bf2  ldr       r1, [pc, #0x10]
+0x03001bf4  ldrb      r1, [r1]
+0x03001bf6  cmp       r1, #0xa0
+0x03001bf8  bhs       #0x3001bfc
+0x03001bfa  adds      r1, #0xe4
+0x03001bfc  cmp       r1, r0
+0x03001bfe  blo       #0x3001c08
+0x03001c00  b         #0x3001ef2
+0x03001c02  movs      r0, r0
+0x03001c04  movs      r6, r0
+0x03001c06  lsls      r0, r0, #0x10
+0x03001c08  ldrb      r6, [r4]
+0x03001c0a  movs      r0, #0xc7
+0x03001c0c  tst       r0, r6
+0x03001c0e  bne       #0x3001c12
+0x03001c10  b         #0x3001ee8
+0x03001c12  movs      r0, #0x80
+0x03001c14  tst       r0, r6
+0x03001c16  beq       #0x3001c48
+0x03001c18  movs      r0, #0x40
+0x03001c1a  tst       r0, r6
+0x03001c1c  bne       #0x3001c58
+0x03001c1e  movs      r6, #3
+0x03001c20  strb      r6, [r4]
+0x03001c22  adds      r0, r3, #0
+0x03001c24  adds      r0, #0x10
+0x03001c26  ldr       r1, [r4, #0x18]
+0x03001c28  adds      r0, r0, r1
+0x03001c2a  str       r0, [r4, #0x28]
+0x03001c2c  ldr       r0, [r3, #0xc]
+0x03001c2e  subs      r0, r0, r1
+0x03001c30  str       r0, [r4, #0x18]
+0x03001c32  movs      r5, #0
+0x03001c34  strb      r5, [r4, #9]
+0x03001c36  str       r5, [r4, #0x1c]
+0x03001c38  ldrb      r2, [r3, #3]
+0x03001c3a  movs      r0, #0xc0
+0x03001c3c  tst       r0, r2
+0x03001c3e  beq       #0x3001ca0
+0x03001c40  movs      r0, #0x10
+0x03001c42  orrs      r6, r0
+0x03001c44  strb      r6, [r4]
+0x03001c46  b         #0x3001ca0
+0x03001c48  ldrb      r5, [r4, #9]
+0x03001c4a  movs      r0, #4
+0x03001c4c  tst       r0, r6
+0x03001c4e  beq       #0x3001c5e
+0x03001c50  ldrb      r0, [r4, #0xd]
+0x03001c52  subs      r0, #1
+0x03001c54  strb      r0, [r4, #0xd]
+0x03001c56  bhi       #0x3001cae
+0x03001c58  movs      r0, #0
+0x03001c5a  strb      r0, [r4]
+0x03001c5c  b         #0x3001ee8
+0x03001c5e  movs      r0, #0x40
+0x03001c60  tst       r0, r6
+0x03001c62  beq       #0x3001c7e
+0x03001c64  ldrb      r0, [r4, #7]
+0x03001c66  muls      r5, r0, r5
+0x03001c68  lsrs      r5, r5, #8
+0x03001c6a  ldrb      r0, [r4, #0xc]
+0x03001c6c  cmp       r5, r0
+0x03001c6e  bhi       #0x3001cae
+0x03001c70  ldrb      r5, [r4, #0xc]
+0x03001c72  cmp       r5, #0
+0x03001c74  beq       #0x3001c58
+0x03001c76  movs      r0, #4
+0x03001c78  orrs      r6, r0
+0x03001c7a  strb      r6, [r4]
+0x03001c7c  b         #0x3001cae
+0x03001c7e  movs      r2, #3
+0x03001c80  ands      r2, r6
+0x03001c82  cmp       r2, #2
+0x03001c84  bne       #0x3001c9c
+0x03001c86  ldrb      r0, [r4, #5]
+0x03001c88  muls      r5, r0, r5
+0x03001c8a  lsrs      r5, r5, #8
+0x03001c8c  ldrb      r0, [r4, #6]
+0x03001c8e  cmp       r5, r0
+0x03001c90  bhi       #0x3001cae
+0x03001c92  adds      r5, r0, #0
+0x03001c94  beq       #0x3001c70
+0x03001c96  subs      r6, #1
+0x03001c98  strb      r6, [r4]
+0x03001c9a  b         #0x3001cae
+0x03001c9c  cmp       r2, #3
+0x03001c9e  bne       #0x3001cae
+0x03001ca0  ldrb      r0, [r4, #4]
+0x03001ca2  adds      r5, r5, r0
+0x03001ca4  cmp       r5, #0xff
+0x03001ca6  blo       #0x3001cae
+0x03001ca8  movs      r5, #0xff
+0x03001caa  subs      r6, #1
+0x03001cac  strb      r6, [r4]
+0x03001cae  strb      r5, [r4, #9]
+0x03001cb0  ldr       r0, [sp, #0x18]
+0x03001cb2  ldrb      r0, [r0, #7]
+0x03001cb4  adds      r0, #1
+0x03001cb6  muls      r0, r5, r0
+0x03001cb8  lsrs      r5, r0, #4
+0x03001cba  ldrb      r0, [r4, #2]
+0x03001cbc  muls      r0, r5, r0
+0x03001cbe  lsrs      r0, r0, #8
+0x03001cc0  strb      r0, [r4, #0xa]
+0x03001cc2  ldrb      r0, [r4, #3]
+0x03001cc4  muls      r0, r5, r0
+0x03001cc6  lsrs      r0, r0, #8
+0x03001cc8  strb      r0, [r4, #0xb]
+0x03001cca  movs      r0, #0x10
+0x03001ccc  ands      r0, r6
+0x03001cce  str       r0, [sp, #0x10]
+0x03001cd0  beq       #0x3001ce2
+0x03001cd2  adds      r0, r3, #0
+0x03001cd4  adds      r0, #0x10
+0x03001cd6  ldr       r1, [r3, #8]
+0x03001cd8  adds      r0, r0, r1
+0x03001cda  str       r0, [sp, #0xc]
+0x03001cdc  ldr       r0, [r3, #0xc]
+0x03001cde  subs      r0, r0, r1
+0x03001ce0  str       r0, [sp, #0x10]
+0x03001ce2  ldr       r5, [sp, #8]
+0x03001ce4  ldr       r2, [r4, #0x18]
+0x03001ce6  ldr       r3, [r4, #0x28]
+0x03001ce8  adr       r0, #0
+0x03001cea  bx        r0
+
+===== A 0x3001cf0-0x3001e44: mix setup + kernel A (no-resample) + sample-end =====
+0x03001cf0  ldr       sb, [r4, #0x1c]
+0x03001cf4  ldrb      sl, [r4, #0xa]
+0x03001cf8  ldrb      fp, [r4, #0xb]
+0x03001cfc  ldrb      r0, [r4, #1]
+0x03001d00  tst       r0, #0x30
+0x03001d04  beq       #0x3001d10
+0x03001d08  bl        #0x3001f0c
+0x03001d0c  b         #0x3001ed0
+0x03001d10  lsl       sl, sl, #0x10
+0x03001d14  lsl       fp, fp, #0x10
+0x03001d18  ldrb      r0, [r4, #1]
+0x03001d1c  tst       r0, #8
+0x03001d20  beq       #0x3001e44
+0x03001d24  cmp       r2, #4
+0x03001d28  ble       #0x3001d94
+0x03001d2c  subs      r2, r2, r8
+0x03001d30  movgt     sb, #0
+0x03001d34  bgt       #0x3001d50
+0x03001d38  mov       sb, r8
+0x03001d3c  add       r2, r2, r8
+0x03001d40  sub       r8, r2, #4
+0x03001d44  sub       sb, sb, r8
+0x03001d48  ands      r2, r2, #3
+0x03001d4c  moveq     r2, #4
+0x03001d50  ldr       r6, [r5]
+0x03001d54  ldr       r7, [r5, #0x630]
+0x03001d58  ldrsb     r0, [r3], #1
+0x03001d5c  mul       r1, sl, r0
+0x03001d60  bic       r1, r1, #0xff0000
+0x03001d64  add       r6, r1, r6, ror #8
+0x03001d68  mul       r1, fp, r0
+0x03001d6c  bic       r1, r1, #0xff0000
+0x03001d70  add       r7, r1, r7, ror #8
+0x03001d74  adds      r5, r5, #0x40000000
+0x03001d78  blo       #0x3001d58
+0x03001d7c  str       r7, [r5, #0x630]
+0x03001d80  str       r6, [r5], #4
+0x03001d84  subs      r8, r8, #4
+0x03001d88  bgt       #0x3001d50
+0x03001d8c  adds      r8, r8, sb
+0x03001d90  beq       #0x3001ed4
+0x03001d94  ldr       r6, [r5]
+0x03001d98  ldr       r7, [r5, #0x630]
+0x03001d9c  ldrsb     r0, [r3], #1
+0x03001da0  mul       r1, sl, r0
+0x03001da4  bic       r1, r1, #0xff0000
+0x03001da8  add       r6, r1, r6, ror #8
+0x03001dac  mul       r1, fp, r0
+0x03001db0  bic       r1, r1, #0xff0000
+0x03001db4  add       r7, r1, r7, ror #8
+0x03001db8  subs      r2, r2, #1
+0x03001dbc  beq       #0x3001e0c
+0x03001dc0  adds      r5, r5, #0x40000000
+0x03001dc4  blo       #0x3001d9c
+0x03001dc8  str       r7, [r5, #0x630]
+0x03001dcc  str       r6, [r5], #4
+0x03001dd0  subs      r8, r8, #4
+0x03001dd4  bgt       #0x3001d24
+0x03001dd8  b         #0x3001ed4
+0x03001ddc  ldr       r0, [sp, #0x18]
+0x03001de0  cmp       r0, #0
+0x03001de4  beq       #0x3001e00
+0x03001de8  ldr       r3, [sp, #0x14]
+0x03001dec  rsb       lr, r2, #0
+0x03001df0  adds      r2, r0, r2
+0x03001df4  bgt       #0x3001ea4
+0x03001df8  sub       lr, lr, r0
+0x03001dfc  b         #0x3001df0
+0x03001e00  pop       {r4, ip}
+0x03001e04  mov       r2, #0
+0x03001e08  b         #0x3001e1c
+0x03001e0c  ldr       r2, [sp, #0x10]
+0x03001e10  cmp       r2, #0
+0x03001e14  ldrne     r3, [sp, #0xc]
+0x03001e18  bne       #0x3001dc0
+0x03001e1c  strb      r2, [r4]
+0x03001e20  lsr       r0, r5, #0x1e
+0x03001e24  bic       r5, r5, #0xc0000000
+0x03001e28  rsb       r0, r0, #3
+0x03001e2c  lsl       r0, r0, #3
+0x03001e30  ror       r6, r6, r0
+0x03001e34  ror       r7, r7, r0
+0x03001e38  str       r7, [r5, #0x630]
+0x03001e3c  str       r6, [r5], #4
+0x03001e40  b         #0x3001edc
+
+===== A 0x3001e44-0x3001ee8: kernel B: pitch-interpolating =====
+0x03001e44  push      {r4, ip}
+0x03001e48  ldr       r1, [r4, #0x20]
+0x03001e4c  mul       r4, ip, r1
+0x03001e50  ldrsb     r0, [r3]
+0x03001e54  ldrsb     r1, [r3, #1]!
+0x03001e58  sub       r1, r1, r0
+0x03001e5c  ldr       r6, [r5]
+0x03001e60  ldr       r7, [r5, #0x630]
+0x03001e64  mul       lr, sb, r1
+0x03001e68  add       lr, r0, lr, asr #23
+0x03001e6c  mul       ip, sl, lr
+0x03001e70  bic       ip, ip, #0xff0000
+0x03001e74  add       r6, ip, r6, ror #8
+0x03001e78  mul       ip, fp, lr
+0x03001e7c  bic       ip, ip, #0xff0000
+0x03001e80  add       r7, ip, r7, ror #8
+0x03001e84  add       sb, sb, r4
+0x03001e88  lsrs      lr, sb, #0x17
+0x03001e8c  beq       #0x3001eb0
+0x03001e90  bic       sb, sb, #0x3f800000
+0x03001e94  subs      r2, r2, lr
+0x03001e98  ble       #0x3001ddc
+0x03001e9c  subs      lr, lr, #1
+0x03001ea0  addeq     r0, r0, r1
+0x03001ea4  ldrsbne   r0, [r3, lr]!
+0x03001ea8  ldrsb     r1, [r3, #1]!
+0x03001eac  sub       r1, r1, r0
+0x03001eb0  adds      r5, r5, #0x40000000
+0x03001eb4  blo       #0x3001e64
+0x03001eb8  str       r7, [r5, #0x630]
+0x03001ebc  str       r6, [r5], #4
+0x03001ec0  subs      r8, r8, #4
+0x03001ec4  bgt       #0x3001e5c
+0x03001ec8  sub       r3, r3, #1
+0x03001ecc  pop       {r4, ip}
+0x03001ed0  str       sb, [r4, #0x1c]
+0x03001ed4  str       r2, [r4, #0x18]
+0x03001ed8  str       r3, [r4, #0x28]
+0x03001edc  ldr       r8, [sp]
+0x03001ee0  add       r0, pc, #1
+0x03001ee4  bx        r0
+
+===== T 0x3001ee8-0x3001f5c: channel wrap-up / loop tail / epilogue =====
+0x03001ee8  ldr       r0, [sp, #4]
+0x03001eea  subs      r0, #1
+0x03001eec  ble       #0x3001ef2
+0x03001eee  adds      r4, #0x40
+0x03001ef0  b         #0x3001be8
+0x03001ef2  ldr       r0, [sp, #0x18]
+0x03001ef4  ldr       r3, [pc, #0x10]
+0x03001ef6  str       r3, [r0]
+0x03001ef8  add       sp, #0x1c
+0x03001efa  pop       {r0, r1, r2, r3, r4, r5, r6, r7}
+0x03001efc  mov       r8, r0
+0x03001efe  mov       sb, r1
+0x03001f00  mov       sl, r2
+0x03001f02  mov       fp, r3
+0x03001f04  pop       {r3}
+0x03001f06  bx        r3
+0x03001f08  ldr       r3, [r2, #0x54]
+0x03001f0a  ldr       r3, [r6, #4]
+0x03001f0c  str       r4, [r4]
+0x03001f0e  b         #0x3001a3a
+0x03001f10  movs      r0, r0
+0x03001f12  b         #0x3001abe
+0x03001f14  movs      r0, r4
+0x03001f16  b         #0x300253a
+0x03001f18  movs      r7, r1
+0x03001f1a  subs      r0, r0, r0
+0x03001f1c  movs      r0, r4
+0x03001f1e  b         #0x3002622
+0x03001f20  movs      r0, r0
+0x03001f22  b         #0x3001aae
+0x03001f24  movs      r1, r0
+0x03001f26  b         #0x3001ad2
+0x03001f28  movs      r0, r2
+0x03001f2a  b         #0x300254e
+0x03001f2c  movs      r4, r0
+0x03001f2e  lsrs      r0, r0, #8
+0x03001f30  asrs      r4, r1, #0x20
+0x03001f32  b         #0x3001a62
+0x03001f34  asrs      r6, r0, #2
+0x03001f36  b         #0x300203c
+0x03001f38  asrs      r0, r4, #0x20
+0x03001f3a  b         #0x3002440
+0x03001f3c  adds      r0, #3
+0x03001f3e  b         #0x3001fc4
+0x03001f40  adds      r0, #0x28
+0x03001f42  b         #0x3001a4e
+0x03001f44  lsls      r0, r6, #2
+0x03001f46  b         #0x30022f6
+0x03001f48  movs      r0, r0
+0x03001f4a  b         #0x30025ee
+0x03001f4c  movs      r2, r0
+0x03001f4e  lsrs      r0, r0, #8
+0x03001f50  adds      r0, #6
+0x03001f52  b         #0x3001fdc
+0x03001f54  adds      r0, #0x10
+0x03001f56  b         #0x30023e0
+0x03001f58  adds      r0, #0x28
+0x03001f5a  b         #0x3001a66
+
+===== A 0x3001f5c-0x3002020: kernel C =====
+0x03001f5c  push      {r8, ip, lr}
+0x03001f60  lsl       sl, sl, #0x10
+0x03001f64  lsl       fp, fp, #0x10
+0x03001f68  ldr       r1, [r4, #0x20]
+0x03001f6c  ldrb      r0, [r4, #1]
+0x03001f70  tst       r0, #8
+0x03001f74  movne     r8, #0x800000
+0x03001f78  muleq     r8, ip, r1
+0x03001f7c  ldrh      r0, [r6]
+0x03001f80  cmp       r0, #0
+0x03001f84  beq       #0x3002110
+0x03001f88  mov       r0, #0xff000000
+0x03001f8c  str       r0, [r4, #0x3c]
+0x03001f90  ldrb      r0, [r4, #1]
+0x03001f94  tst       r0, #0x10
+0x03001f98  bne       #0x3002068
+0x03001f9c  bl        #0x30021c8
+0x03001fa0  mov       r0, r1
+0x03001fa4  add       r3, r3, #1
+0x03001fa8  bl        #0x30021c8
+0x03001fac  sub       r1, r1, r0
+0x03001fb0  ldr       r6, [r5]
+0x03001fb4  ldr       r7, [r5, #0x630]
+0x03001fb8  mul       lr, sb, r1
+0x03001fbc  add       lr, r0, lr, asr #23
+0x03001fc0  mul       ip, sl, lr
+0x03001fc4  bic       ip, ip, #0xff0000
+0x03001fc8  add       r6, ip, r6, ror #8
+0x03001fcc  mul       ip, fp, lr
+0x03001fd0  bic       ip, ip, #0xff0000
+0x03001fd4  add       r7, ip, r7, ror #8
+0x03001fd8  add       sb, sb, r8
+0x03001fdc  lsrs      lr, sb, #0x17
+0x03001fe0  beq       #0x3002018
+0x03001fe4  bic       sb, sb, #0x3f800000
+0x03001fe8  subs      r2, r2, lr
+0x03001fec  ble       #0x3002040
+0x03001ff0  subs      lr, lr, #1
+0x03001ff4  bne       #0x3002000
+0x03001ff8  add       r0, r0, r1
+0x03001ffc  b         #0x300200c
+0x03002000  add       r3, r3, lr
+0x03002004  bl        #0x30021c8
+0x03002008  mov       r0, r1
+0x0300200c  add       r3, r3, #1
+0x03002010  bl        #0x30021c8
+0x03002014  sub       r1, r1, r0
+0x03002018  adds      r5, r5, #0x40000000
+0x0300201c  blo       #0x3001fb8
