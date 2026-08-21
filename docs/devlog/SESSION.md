@@ -535,3 +535,19 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   distinct causes (MMU window, OC flash-write corruption, SD data damage).
   Never pattern-match to the previous fix; the BADJUMP dump + PEEK sweep
   now identify the layer in minutes.
+
+## 2026-08-21: Emerald-US white-title root cause -- the unverified mode-1 painter
+
+- Screenshot bisect (SHOT frames, framebuffer-level): GameFreak logo (mode 0)
+  renders perfectly; everything after goes white WITH mode1RenderLineFast
+  routed, and the attract loop progresses normally (copyright screen came
+  back around) with it disabled. The painter shipped unverified during the
+  60fps push and every white-game report since traces to it.
+- mode1RenderLineFast/fastPaintAffineBG2 are now UNROUTED (code kept for a
+  future verified attempt). Suspect: the BG2X/BG2Y writeback interacting
+  with slow-path lines (mosaic bail / effect lines double-advance the
+  affine reference), and/or the fade path. Verify with SHOT bisects per
+  scene before ever re-routing.
+- Separate real issue fixed the same night: the 260MHz overclock overdrives
+  the LCD SPI clock past this ILI9341's tolerance -- panel white ~10s into
+  gameplay while the game runs on. LCD_SPI_HZ 60 -> 55MHz (59.6 under OC).

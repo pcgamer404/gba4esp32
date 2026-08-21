@@ -12647,12 +12647,10 @@ inline renderfunc_t GetRenderFunc(int mode, int type) {
 #endif
 		case 0x01: return mode0RenderLineNoWindow<renderer_idx>;
 		case 0x02: return mode0RenderLineAll<renderer_idx>;
-#if THREADED_RENDERER
-		case 0x10: return renderer_idx == 0 ? mode1RenderLineFast
-		                                    : mode1RenderLine<renderer_idx>;
-#else
+		/* mode1RenderLineFast is DISABLED pending visual verification: the
+		 * Emerald title screen renders white through it (framebuffer-level,
+		 * proven by screenshot bisect). The slow template is correct. */
 		case 0x10: return mode1RenderLine<renderer_idx>;
-#endif
 		case 0x11: return mode1RenderLineNoWindow<renderer_idx>;
 		case 0x12: return mode1RenderLineAll<renderer_idx>;
 		case 0x20: return mode2RenderLine<renderer_idx>;
