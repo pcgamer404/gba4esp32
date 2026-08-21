@@ -923,9 +923,19 @@ static inline void m4aSt8(u32 a, u8 v)   { *m4aPtr(a) = v; }
  * add sp,#0x1c + pop {r0-r7} (-> r8-fp, r4-r7) + pop {pc}.
  * Returns false to bail: the caller lets the interpreter run the original. */
 void CPUReset(void); /* below; the bad-jump handler restarts the game */
+#ifdef ESP_PLATFORM
+extern "C" void espgba_on_bad_cart(void); /* port: invalidate pack + reboot */
+#endif
 static void espgba_bad_jump(void)
 {
    static int dumps = 0;
+#ifdef ESP_PLATFORM
+   /* A game that keeps doing this has a broken pack in flash; a plain game
+    * reset just loops the same corruption. Give it two chances, then hand
+    * recovery to the port (re-pack from SD on the next pick). */
+   if (dumps >= 2)
+      espgba_on_bad_cart();
+#endif
    if (dumps < 5) {
       dumps++;
       printf("BADJUMP: pc=0x%08x lr=0x%08x sp=0x%08x r0=0x%08x r1=0x%08x "

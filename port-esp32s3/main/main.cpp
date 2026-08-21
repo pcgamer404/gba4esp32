@@ -128,6 +128,17 @@ void emuRunFrame() {
   frameCount++;
 }
 
+/* Called by the emulator core when a game keeps jumping into unmapped
+ * memory: the pack in flash is untrustworthy (bad copy, damaged source).
+ * Forget it and reboot to the picker; the next pick re-packs from SD. */
+extern "C" void espgba_on_bad_cart(void) {
+  printf("BADCART: repeated bad jumps -- invalidating the flash pack and "
+         "rebooting to the menu (next pick re-packs from SD)\n");
+  romInvalidateFlashed();
+  delayMS(200);
+  esp_restart();
+}
+
 void systemMessage(const char *fmt, ...) {
   char buf[256];
   va_list args;

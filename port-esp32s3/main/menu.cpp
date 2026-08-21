@@ -744,6 +744,21 @@ uint32_t romGetFlashedSize(void) {
   return v;
 }
 
+/* Forget what is flashed: the next pick of any game does a full re-pack from
+ * the SD. Called by the bad-cart handler when a game keeps jumping into
+ * unmapped memory -- the pack in flash cannot be trusted anymore. */
+void romInvalidateFlashed(void) {
+  nvs_handle_t h;
+  if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
+    return;
+  }
+  nvs_erase_key(h, NVS_KEY);
+  nvs_erase_key(h, NVS_KEY_CODE);
+  nvs_erase_key(h, NVS_KEY_PAGES);
+  nvs_commit(h);
+  nvs_close(h);
+}
+
 static void romSetFlashed(const char *name, const char *code) {
   nvs_handle_t h;
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {

@@ -20,6 +20,8 @@ int menuChooseRom(const sdRomEntry *roms, int n, const char *flashed);
 void menuOverlayFps(const char *text); /* into FB, after byteswap */
 
 bool romGetFlashed(char *out, size_t len);
+/* Forget the flashed pack: next pick re-packs from SD (bad-cart recovery). */
+void romInvalidateFlashed(void);
 uint32_t romGetFlashedSize(void);
 uint32_t romGetPageMap(int *pagesOut, uint32_t maxPages);
 bool romCopyFromSd(const char *name, uint32_t size, const char *code);

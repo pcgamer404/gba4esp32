@@ -499,3 +499,39 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   lcdFillScreen at link if lucky, wrong pins if not). Always
   `ESP_GBA_BOARD=FNK0104AB pio run` / use tools/flash_qio.sh with that env.
   Also penv needs setuptools<81 after any PlatformIO update (pkg_resources).
+
+## 2026-08-20 night: the SECOND FireRed "not booting" -- damaged SD data, proven byte-by-byte
+
+- SYMPTOM (new board): FireRed crash <1s at boot, LoadProhibited BX-to-~0,
+  same signature as the MMU bug -- but the tail hand-map reported success and
+  the old board ran the identical firmware fine.
+- METHOD: (1) BADJUMP guard in the prefetch macros converts the host panic
+  into an emulated-context dump + game reset -- one line gave pc=0xfffffffe,
+  lr=0x081c1453 (inside m4a SoundMain), registers full of 0xFFFFFFFF: the
+  game was calling function pointers read as ERASED FLASH. (2) PEEK sweep of
+  all 256 pages vs the host ROM: 86 pages of real data read as 0xFF
+  (63-108, 192-217, 240-253 -- large contiguous runs = storage damage, not a
+  classification bug).
+- ROOT CAUSE: the SD card's FireRed data was damaged (most plausibly during
+  the pre-guard overclocked session; SDMMC clock rides the overdriven PLL).
+  The old board coasted on its earlier good flash pack; the new board packed
+  from damaged source and faithfully installed the holes.
+- REPAIR: PUTFILE cap raised 2MB->32MB; clean ROM pushed over USB (paced
+  ~48KB/s -- the receiver reads byte-at-a-time, faster streams overflow its
+  8KB buffer), ack-verified 16777216/16777216 OK; pack caches STALE'd; flash
+  evicted via a Red pick (name-match "already in flash" otherwise SKIPS the
+  repack -- lost an hour to that); true rescan gave the known-good signature
+  150 written/107 blank; FireRed runs at 55 fps from both boot paths.
+- PERMANENT GUARDS now in the code:
+  * prefetch bad-jump guard: dump emulated context, reset the GAME, console
+    stays up;
+  * after 2 bad-jump resets in one session: invalidate the flashed-pack NVS
+    record and reboot -- the next pick re-packs from SD (self-healing);
+  * HLE mixer: first-fire code-signature check (disarms on mismatch) and
+    validate-before-commit epilogue (a wrong frame can no longer clobber
+    registers on the way out);
+  * BENCH carries keys= for stuck-button visibility.
+- LESSON for future sessions: "FireRed does not boot" has now had THREE
+  distinct causes (MMU window, OC flash-write corruption, SD data damage).
+  Never pattern-match to the previous fix; the BADJUMP dump + PEEK sweep
+  now identify the layer in minutes.
