@@ -484,6 +484,10 @@ extern "C" void app_main() {
         }
       }
     }
+    /* Bound for the save-string scan (gbaover.cpp): reads past the mapped
+     * span would fault. */
+    extern uint32_t espgba_rom_size;
+    espgba_rom_size = want * 0x10000u;
   } else {
     /* No page map recorded (old copy): fall back to a flat mapping. */
     uint32_t mapSize = romGetFlashedSize();
@@ -495,6 +499,8 @@ extern "C" void app_main() {
                              (const void **)&rom, &outHandle);
     printf("rom: flat map of %u bytes: %s\n", (unsigned)mapSize,
            esp_err_to_name(ret));
+    extern uint32_t espgba_rom_size;
+    espgba_rom_size = mapSize;
   }
   if (ret != ESP_OK) {
     printf("rom: mmap failed: %s\n", esp_err_to_name(ret));

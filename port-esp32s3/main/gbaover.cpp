@@ -179,6 +179,22 @@ static const ini_t gbaover[256] __attribute__((section(".rodata.gbaover"))) = {
     {"Zoku Bokura no Taiyou - Taiyou Shounen Django (Japan)", "U32J", 0, 0, 1,
      0, 0}};
 
+
+/* Set by main.cpp after the cart mmap: bytes of `rom` safe to read. */
+uint32_t espgba_rom_size = 0;
+
+/* Find `pat` in the ROM (bounded memmem: the ROM is full of zero bytes, so
+ * strstr cannot be used). */
+static bool romHasString(const char *pat, uint32_t limit) {
+  size_t n = strlen(pat);
+  if (limit < n) return false;
+  for (uint32_t i = 0; i + n <= limit; i++) {
+    if (rom[i] == (uint8_t)pat[0] && memcmp(rom + i, pat, n) == 0)
+      return true;
+  }
+  return false;
+}
+
 void load_image_preferences(void) {
   char buffer[5];
   buffer[0] = rom[0xac];
@@ -201,8 +217,6 @@ void load_image_preferences(void) {
   }
 
   if (found) {
-    //if (log_cb) log_cb(RETRO_LOG_DEBUG, "Found ROM in vba-over list.\n");
-
     enableRtc = gbaover[found_no].rtcEnabled;
 
     if (gbaover[found_no].flashSize != 0)
@@ -213,6 +227,38 @@ void load_image_preferences(void) {
     cpuSaveType = gbaover[found_no].saveType;
 
     mirroringEnable = gbaover[found_no].mirroringEnabled;
+    printf("SAVE: override table hit for %s\n", buffer);
+  } else {
+    /* Not in the table: detect the save hardware from the ID strings the
+     * standard save libraries embed in every commercial cart (and nearly
+     * every romhack). Without this, a FLASH1M game missing from the table
+     * keeps the 64KB default, its boot-time save probe never succeeds, and
+     * it sits in forced blank forever -- a white screen at boot. Priority
+     * matters: FLASH1M before the FLASH prefix it contains. */
+    uint32_t limit = espgba_rom_size ? espgba_rom_size : (4 * 1024 * 1024);
+    if (romHasString("FLASH1M_V", limit)) {
+      flashSize = 0x20000;
+      cpuSaveType = 0;
+      printf("SAVE: detected FLASH1M (128KB flash)\n");
+    } else if (romHasString("FLASH512_V", limit) ||
+               romHasString("FLASH_V", limit)) {
+      flashSize = 0x10000;
+      cpuSaveType = 0;
+      printf("SAVE: detected FLASH 64KB\n");
+    } else if (romHasString("SRAM_V", limit) ||
+               romHasString("SRAM_F_V", limit)) {
+      cpuSaveType = 2;
+      printf("SAVE: detected SRAM\n");
+    } else if (romHasString("EEPROM_V", limit)) {
+      cpuSaveType = 1;
+      printf("SAVE: detected EEPROM\n");
+    } else {
+      printf("SAVE: no ID string found; keeping defaults\n");
+    }
+    if (romHasString("SIIRTC_V", limit)) {
+      enableRtc = true;
+      printf("SAVE: detected RTC (SIIRTC)\n");
+    }
   }
 
 

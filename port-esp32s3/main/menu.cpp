@@ -484,8 +484,9 @@ static void drawLibrary(void) {
   }
   menuText(3, MENU_H - 10, foot, roms[sel].fits ? 0x7BEF : 0xF800);
 
-  /* Battery + charge state, left of the settings chip. "CHG" while a USB
-   * host is powering the board, else the pack voltage. */
+  /* Battery + charge state, top-right corner of the title bar. "CHG" in
+   * green while a USB host is powering the board, else the pack voltage
+   * (red under 3.5V = time to charge). */
   {
     int mv = osBatteryMv();
     int chg = osUsbPresent();
@@ -501,8 +502,8 @@ static void drawLibrary(void) {
       batt[0] = 0;
     }
     int w = (int)strlen(batt) * 8;
-    menuText(LCD_W - 140 - w, MENU_H - 10, batt,
-             chg ? 0x07E0 : mv < 3500 ? 0xF800 : 0x7BEF);
+    menuText(MENU_W - 4 - w, 2, batt,
+             chg ? 0x07E0 : mv < 3500 ? 0xF800 : 0xFFFF);
   }
 
   /* Last so nothing overdraws it. */
