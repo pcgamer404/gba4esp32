@@ -235,6 +235,20 @@ static void __attribute__((noinline)) IRAM_ATTR revertTo240(void) {
 
 bool clkAt320(void) { return s_at320; }
 
+/* Drop back to stock BEFORE any flash/NVS write. The overdriven BBPLL also
+ * overdrives the SPI flash clock (+8%), and writes at that speed have
+ * corrupted the cart image in testing. Stays at stock afterwards; the next
+ * game start re-engages the hold if auto mode is on. */
+void clkFlashGuard(void) {
+  if (!s_at320) {
+    return;
+  }
+  revertTo240();
+  s_at320 = false;
+  s_holdMagic = 0;
+  printf("CLK: dropped to stock 240 for a flash write\n");
+}
+
 /* Persistent "switch to 278 after the game starts" flag. Unlike the one-shot
  * hold, this survives reboots: the switch happens AFTER all drivers came up
  * at stock 240, which is the order proven to work. */
@@ -249,6 +263,7 @@ bool clkAutoGet(void) {
 }
 
 void clkAutoSet(bool on) {
+  clkFlashGuard(); /* never write NVS while overclocked */
   nvs_handle_t h;
   if (nvs_open("clk", NVS_READWRITE, &h) == ESP_OK) {
     nvs_set_u8(h, "auto278", on ? 1 : 0);

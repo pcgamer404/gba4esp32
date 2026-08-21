@@ -23,7 +23,6 @@
 #include "sd.h"
 #include "menu.h"
 #include "audio.h"
-#include "touch.h"
 #include "save.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -304,12 +303,15 @@ extern "C" void app_main() {
   audioDumpRegs();
   audioTestTonePolarity(900, 440);
   audioDumpRegs();
-  touchInit();
-  /* Calibrate once. Guessing the portrait->landscape transform got it wrong
-   * twice; three tapped corners measure it and it is kept in NVS. */
-  if (!touchCalLoad()) {
-    printf("TOUCH: no stored calibration, running it now\n");
-    menuRunTouchCalibration();
+  /* User volume (settings menu, NVS "ui"/"vol"); 0 = mute. */
+  {
+    nvs_handle_t uih;
+    uint8_t vol = AUDIO_DEFAULT_VOLUME_PCT;
+    if (nvs_open("ui", NVS_READONLY, &uih) == ESP_OK) {
+      nvs_get_u8(uih, "vol", &vol);
+      nvs_close(uih);
+    }
+    audioSetVolume(vol);
   }
 
   static char flashed[260] = {0};
@@ -783,6 +785,7 @@ extern "C" void app_main() {
       bool upNow = (joy & (1u << 6)) != 0;
       if (upNow && !upWas) {
         showFps ^= 1;
+        clkFlashGuard(); /* never write NVS while overclocked */
         nvs_handle_t uih;
         if (nvs_open("ui", NVS_READWRITE, &uih) == ESP_OK) {
           nvs_set_u8(uih, "dbg", (uint8_t)showFps);

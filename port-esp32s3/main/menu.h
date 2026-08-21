@@ -9,13 +9,11 @@ extern "C" {
 #endif
 
 void menuInitInput(void);
-bool touchCalLoad(void);
-bool menuRunTouchCalibration(void);
 void menuFlush(void);
 void menuMessage(const char *line1, const char *line2);
 void menuProgress(const char *label, int pct);
 
-/* Blocks until buttons/touch/serial select an entry. Returns the index.
+/* Blocks until buttons or serial select an entry. Returns the index.
  * Nothing ever starts without an explicit pick. */
 int menuChooseRom(const sdRomEntry *roms, int n, const char *flashed);
 

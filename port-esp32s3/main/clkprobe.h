@@ -32,6 +32,11 @@ bool clkHoldNow(void);
 
 bool clkAt320(void);
 
+/* Drop back to stock 240 if currently overclocked. MUST be called before any
+ * flash or NVS write: the overdriven PLL also overdrives the SPI flash clock
+ * and writes at that speed have corrupted the cart image. No-op at stock. */
+void clkFlashGuard(void);
+
 /* Persistent auto-switch: hold 278 right after a game starts (drivers all
  * initialized at stock 240 first -- the proven order). Toggled over serial. */
 bool clkAutoGet(void);

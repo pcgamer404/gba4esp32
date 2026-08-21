@@ -329,42 +329,7 @@ void lcdSelfTest(void) {
                   "%02x%02x%02x (expect ~f8 00 00)",
            rgb[0], rgb[1], rgb[2], rgb[3], rgb[4], rgb[5], rgb[6], rgb[7], rgb[8]);
 
-  /* How tall is this panel really?
-   *
-   * FNK0104S (4.0" ST7796, 320x480) uses the SAME LCD pins as FNK0104AB
-   * (2.8" ILI9341, 240x320), and ST7796 accepts ILI9341 commands -- so a
-   * working picture does not identify the board. Frame memory does: switch to
-   * portrait, write a pixel at a row only the taller panel has, and read it
-   * back. This also decides which pins the SD card is on (4/5/6/7/2/3 on AB
-   * vs 40/38/39/41/48/47 on N/S).
-   */
-  {
-    static uint16_t one = 0x00F8;  /* red */
-    uint8_t rgb[3] = {0};
-    lcdCmd8(0x36);
-    lcdDat8(0x48);  /* portrait: rows run to 319 (AB) or 479 (S) */
-
-    lcdBlitRegion((uint8_t *)&one, 8, 400, 1, 1);
-    lcdReadPixels(8, 400, 1, rgb);
-    int tall = (rgb[0] > 0x80 && rgb[1] < 0x40 && rgb[2] < 0x40);
-
-    uint8_t rgb2[3] = {0};
-    lcdBlitRegion((uint8_t *)&one, 8, 200, 1, 1);
-    lcdReadPixels(8, 200, 1, rgb2);
-    int short_ok = (rgb2[0] > 0x80 && rgb2[1] < 0x40 && rgb2[2] < 0x40);
-
-    ESP_LOGI("LCD", "panel height probe: row200=%02x%02x%02x(%s) row400=%02x%02x%02x(%s)"
-                    " => %s",
-             rgb2[0], rgb2[1], rgb2[2], short_ok ? "ok" : "no",
-             rgb[0], rgb[1], rgb[2], tall ? "ok" : "no",
-             tall ? "320x480 panel (FNK0104S/N, SD on 40/38/39/41/48/47)"
-                  : "240x320 panel (FNK0104AB, SD on 4/5/6/7/2/3)");
-
-    lcdCmd8(0x36);
-    lcdDat8(0x28);  /* back to landscape */
-  }
-
-  ESP_LOGI("LCD", "geometry: LCD_W=%d LCD_H=%d  GBA window x=%d..%d y=%d..%d",
+    ESP_LOGI("LCD", "geometry: LCD_W=%d LCD_H=%d  GBA window x=%d..%d y=%d..%d",
            LCD_W, LCD_H, GBA_X_OFF, GBA_X_OFF + 239, GBA_Y_OFF, GBA_Y_OFF + 159);
 }
 
@@ -628,8 +593,6 @@ static uint32_t matrixScan(void) {
 #endif
 
 static volatile uint32_t serialKeys = 0;
-/* L/R from the touchscreen borders, written by the main loop each frame. */
-volatile uint32_t osTouchKeys = 0;
 
 /* Battery voltage: GPIO9 = ADC1_CH8 behind a 1:2 divider (schematic R14/R15),
  * so the pack voltage is twice the pin reading. Shared by the menu gauge and
@@ -700,7 +663,7 @@ uint32_t osReadKey() {
 #if defined(BOARD_FNK0104AB)
   ret |= matrixScan();
 #endif
-  return ret | serialKeys | osTouchKeys;
+  return ret | serialKeys;
 }
 
 /* Serial backend.

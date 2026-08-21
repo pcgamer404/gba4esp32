@@ -27,7 +27,7 @@
 #include <sys/types.h>
 #include "os.h"
 #include "sd.h"
-#include "touch.h"
+#include "audio.h"
 #include "clkprobe.h"
 #include <stdlib.h>
 #include <unistd.h>  /* unlink: drop a truncated pak cache */
@@ -280,7 +280,7 @@ static void iconDraw(const sdRomEntry *rom, int x0, int y0) {
 
 /* ------------------------------------------------------------------ */
 /* Settings screen (gear icon in the picker). NVS-backed, navigable by   */
-/* touch AND the button matrix: Up/Down select, A toggles, B leaves.     */
+/* the button matrix: Up/Down select, A toggles, B leaves.               */
 
 extern int showFps; /* main.cpp: border debug strip */
 
@@ -303,12 +303,14 @@ static void settingsSet(const char *key, uint8_t v) {
   }
 }
 
+#define SET_ROWS 5 /* 3 toggles + volume + back */
+
 static int gSetSel;
 static void drawSettings(void) {
   menuClear(0x0000);
   menuText(16, 8, "SETTINGS", 0xFFFF);
-  const char *names[3] = {"Debug overlay", "Overclock 278MHz", "Native audio mix"};
-  uint8_t vals[3] = {settingsGet("dbg", 1), (uint8_t)(clkAutoGet() ? 1 : 0),
+  const char *names[3] = {"Debug overlay", "Overclock 260MHz", "Native audio mix"};
+  uint8_t vals[3] = {settingsGet("dbg", 0), (uint8_t)(clkAutoGet() ? 1 : 0),
                      settingsGet("hle", 1)};
   for (int i = 0; i < 3; i++) {
     int y = 40 + i * 26;
@@ -322,20 +324,51 @@ static void drawSettings(void) {
   if (gSetSel == 3) {
     menuBar(10, y - 4, MENU_W - 20, 22, 0x18E3);
   }
+  menuText(24, y, "Volume", 0xFFFF);
+  uint8_t vol = settingsGet("vol", AUDIO_DEFAULT_VOLUME_PCT);
+  if (vol == 0) {
+    menuText(MENU_W - 92, y, "MUTE", 0xF800);
+  } else {
+    char v[12];
+    snprintf(v, sizeof(v), "< %3d%% >", vol);
+    menuText(MENU_W - 92, y, v, 0x07E0);
+  }
+  y = 40 + 4 * 26;
+  if (gSetSel == 4) {
+    menuBar(10, y - 4, MENU_W - 20, 22, 0x18E3);
+  }
   menuText(24, y, "Back", 0x7BEF);
-  menuText(16, MENU_H - 20, "tap a row / A toggle / B back", 0x39E7);
+  menuText(16, MENU_H - 20, "A toggle / left-right volume / B back", 0x39E7);
 }
 
 static void settingsToggle(int i) {
   if (i == 0) {
-    uint8_t v = !settingsGet("dbg", 1);
+    uint8_t v = !settingsGet("dbg", 0);
     settingsSet("dbg", v);
     showFps = v;
   } else if (i == 1) {
     clkAutoSet(!clkAutoGet());
   } else if (i == 2) {
     settingsSet("hle", !settingsGet("hle", 1));
+  } else if (i == 3) {
+    /* A on the volume row = mute toggle, remembering the level. */
+    uint8_t vol = settingsGet("vol", AUDIO_DEFAULT_VOLUME_PCT);
+    if (vol > 0) {
+      settingsSet("volp", vol);
+      settingsSet("vol", 0);
+    } else {
+      settingsSet("vol", settingsGet("volp", AUDIO_DEFAULT_VOLUME_PCT));
+    }
+    audioSetVolume(settingsGet("vol", AUDIO_DEFAULT_VOLUME_PCT));
   }
+}
+
+static void settingsVolumeStep(int dir) {
+  int vol = settingsGet("vol", AUDIO_DEFAULT_VOLUME_PCT) + dir * 10;
+  if (vol < 0) vol = 0;
+  if (vol > 100) vol = 100;
+  settingsSet("vol", (uint8_t)vol);
+  audioSetVolume(vol);
 }
 
 static void menuSettings(void) {
@@ -343,25 +376,23 @@ static void menuSettings(void) {
   menuRender(drawSettings);
   uint32_t lastKeys = 0xFFFFFFFF; /* force release before first press */
   while (1) {
-    touchPoint t;
-    if (touchTap(&t)) {
-      int row = (t.y - 36) / 26;
-      if (row >= 0 && row < 3) {
-        settingsToggle(row);
-        gSetSel = row;
-        menuRender(drawSettings);
-        continue;
-      }
-      if (row == 3) return;
-      return; /* tap anywhere else = back */
-    }
     uint32_t k = osReadKey();
     uint32_t pressed = k & ~lastKeys;
     lastKeys = k;
-    if (pressed & (1u << 6)) { gSetSel = (gSetSel + 3) % 4; menuRender(drawSettings); }
-    if (pressed & (1u << 7)) { gSetSel = (gSetSel + 1) % 4; menuRender(drawSettings); }
-    if (pressed & (1u << 0)) {
-      if (gSetSel == 3) return;
+    if (pressed & (1u << 6)) { /* up */
+      gSetSel = (gSetSel + SET_ROWS - 1) % SET_ROWS;
+      menuRender(drawSettings);
+    }
+    if (pressed & (1u << 7)) { /* down */
+      gSetSel = (gSetSel + 1) % SET_ROWS;
+      menuRender(drawSettings);
+    }
+    if (gSetSel == 3 && (pressed & ((1u << 5) | (1u << 4)))) { /* volume +/- */
+      settingsVolumeStep((pressed & (1u << 4)) ? +1 : -1);
+      menuRender(drawSettings);
+    }
+    if (pressed & (1u << 0)) { /* A */
+      if (gSetSel == 4) return;
       settingsToggle(gSetSel);
       menuRender(drawSettings);
     }
@@ -388,19 +419,15 @@ static int gN, gSel;
 static const char *gFlashed;
 
 static void drawGear(void) {
-  /* An unmissable labeled chip, BOTTOM-right -- clear of the game grid. */
+  /* Bottom-right chip telling the player how to reach the settings. */
   int y = MENU_H - 18;
-  menuBar(MENU_W - 90, y, 88, 16, 0x18E3);
-  menuBar(MENU_W - 90, y, 88, 1, 0x7BEF);
-  menuBar(MENU_W - 90, y + 15, 88, 1, 0x7BEF);
-  for (int b = 0; b < 3; b++) {
-    menuBar(MENU_W - 86, y + 3 + b * 4, 10, 2, 0x07E0);
-  }
-  menuText(MENU_W - 72, y + 4, "SETTINGS", 0xFFFF);
+  menuBar(MENU_W - 132, y, 130, 16, 0x18E3);
+  menuBar(MENU_W - 132, y, 130, 1, 0x7BEF);
+  menuBar(MENU_W - 132, y + 15, 130, 1, 0x7BEF);
+  menuText(MENU_W - 128, y + 4, "SELECT=SETTINGS", 0xFFFF);
 }
 
 static void drawLibrary(void) {
-  drawGear();
   const sdRomEntry *roms = gRoms;
   int n = gN, sel = gSel;
   const char *flashed = gFlashed;
@@ -473,9 +500,12 @@ static void drawLibrary(void) {
       batt[0] = 0;
     }
     int w = (int)strlen(batt) * 8;
-    menuText(LCD_W - 100 - w, MENU_H - 10, batt,
+    menuText(LCD_W - 140 - w, MENU_H - 10, batt,
              osUsbPresent() ? 0x07E0 : mv < 3500 ? 0xF800 : 0x7BEF);
   }
+
+  /* Last so nothing overdraws it. */
+  drawGear();
 }
 
 static void drawList(const sdRomEntry *roms, int n, int sel, const char *flashed) {
@@ -529,72 +559,6 @@ int menuChooseRom(const sdRomEntry *roms, int n, const char *flashed) {
         return sp;
       }
       ESP_LOGW(TAG, "serial pick [%d] does not fit flash, ignored", sp);
-    }
-
-    /* Touch: tap a row to highlight it, tap the highlighted row again to play.
-     * Raw coordinates are logged so the portrait->landscape mapping can be
-     * checked against real taps instead of trusted blind. */
-    touchPoint t;
-    if (touchTap(&t)) {
-      /* The menu draws on the WHOLE 320x240 panel at absolute coordinates
-       * (GRID_X0=6, 5*62=310 wide) -- there is no GBA window offset here.
-       * Subtracting GBA_X/Y_OFF displaced every hit box 40px up-left, which
-       * is exactly the "icons don't react where they are drawn" complaint. */
-      int mx = t.x;
-      int my = t.y;
-      gaugeMs = 0;
-      ESP_LOGI(TAG, "tap raw=(%d,%d) screen=(%d,%d) menu=(%d,%d)", t.rawX,
-               t.rawY, t.x, t.y, mx, my);
-
-      /* Settings chip (bottom-right corner). */
-      if (mx >= LCD_W - 92 && my >= LCD_H - 22) {
-        menuSettings();
-        drawList(roms, n, sel, flashed);
-        continue;
-      }
-
-      /* Edge taps flip library pages -- the "scrolling" a finger expects.
-       * With one page of ROMs there is nothing to flip and taps fall through
-       * to the grid as before. */
-      if (n > GRID_PER_PAGE && mx >= LCD_W - 26) {
-        sel = (sel + GRID_PER_PAGE < n) ? sel + GRID_PER_PAGE
-                                        : sel % GRID_PER_PAGE;
-        if (sel >= n) sel = n - 1;
-        drawList(roms, n, sel, flashed);
-        continue;
-      }
-      if (n > GRID_PER_PAGE && mx < 26) {
-        int pages = (n + GRID_PER_PAGE - 1) / GRID_PER_PAGE;
-        sel = (sel >= GRID_PER_PAGE)
-                  ? sel - GRID_PER_PAGE
-                  : (pages - 1) * GRID_PER_PAGE + (sel % GRID_PER_PAGE);
-        if (sel >= n) sel = n - 1;
-        drawList(roms, n, sel, flashed);
-        continue;
-      }
-
-      if (mx >= GRID_X0 && my >= GRID_Y0) {
-        int col = (mx - GRID_X0) / CELL_W;
-        int row = (my - GRID_Y0) / CELL_H;
-        if (col >= 0 && col < GRID_COLS && row >= 0 && row < GRID_ROWS) {
-          int idx = (sel / GRID_PER_PAGE) * GRID_PER_PAGE + row * GRID_COLS + col;
-          if (idx < n) {
-            if (idx == sel) {
-              if (!roms[idx].fits) {
-                menuMessage("too big for flash", "pick another game");
-                delayMS(1500);
-                drawList(roms, n, sel, flashed);
-              } else {
-                return sel;  /* second tap on the same icon = play */
-              }
-            } else {
-              sel = idx;
-              drawList(roms, n, sel, flashed);
-            }
-          }
-        }
-      }
-      continue;
     }
 
     {
@@ -811,6 +775,7 @@ static void romSetFlashed(const char *name, const char *code) {
  * ROM. No paging, no SD reads at runtime, no loss of speed.
  */
 bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
+  clkFlashGuard(); /* flash writes ahead: force stock clock (no-op normally) */
   {
     const char *dot = strrchr(name, '.');
     m4aPatchEnabled = dot && strcasecmp(dot, ".gba") == 0;
@@ -1082,76 +1047,6 @@ uint32_t romGetPageMap(int *pagesOut, uint32_t maxPages) {
     pagesOut[i] = (int)(base + map[i]);
   }
   return nPages;
-}
-
-/* ------------------------------------------------------------------ */
-/* Touch calibration                                                    */
-
-static int gTgtX, gTgtY;
-static void drawTarget(void) {
-  menuClear(0x0000);
-  menuText(14, 14, "touch calibration", 0xFFFF);
-  menuText(14, 30, "tap the centre of each cross", 0x7BEF);
-  /* crosshair */
-  for (int i = -10; i <= 10; i++) {
-    menuPix(gTgtX + i, gTgtY, 0x07E0);
-    menuPix(gTgtX, gTgtY + i, 0x07E0);
-  }
-  menuBar(gTgtX - 2, gTgtY - 2, 5, 5, 0xF800);
-}
-
-static void showTarget(int x, int y) {
-  gTgtX = x;
-  gTgtY = y;
-  menuRender(drawTarget);
-}
-
-#define NVS_KEY_CAL "touchcal"
-
-bool touchCalLoad(void) {
-  nvs_handle_t h;
-  if (nvs_open(NVS_NS, NVS_READONLY, &h) != ESP_OK) {
-    return false;
-  }
-  touchCal c;
-  size_t sz = sizeof(c);
-  esp_err_t err = nvs_get_blob(h, NVS_KEY_CAL, &c, &sz);
-  nvs_close(h);
-  if (err != ESP_OK || sz != sizeof(c) || !c.valid) {
-    return false;
-  }
-  touchSetCal(&c);
-  return true;
-}
-
-static void touchCalSave(void) {
-  nvs_handle_t h;
-  if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
-    return;
-  }
-  nvs_set_blob(h, NVS_KEY_CAL, touchGetCal(), sizeof(touchCal));
-  nvs_commit(h);
-  nvs_close(h);
-}
-
-/* Runs once, then never again unless NVS is cleared. Three corners, measured
- * rather than derived -- see touchCalibrate(). */
-bool menuRunTouchCalibration(void) {
-  const int m = 24;
-  if (!touchCalibrate(m, m, MENU_W - m, m, m, MENU_H - m, showTarget)) {
-    menuMessage("calibration failed", "using default mapping");
-    delayMS(2000);
-    return false;
-  }
-  touchCalSave();
-  menuMessage("calibration saved", "tap to continue");
-  touchPoint t;
-  int guard = 0;
-  while (!touchTap(&t) && guard < 5000) {
-    delayMS(20);
-    guard += 20;
-  }
-  return true;
 }
 
 /* On-screen FPS, drawn into the 240x160 GAME framebuffer after the byteswap so

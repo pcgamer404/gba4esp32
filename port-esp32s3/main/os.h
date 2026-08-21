@@ -77,7 +77,7 @@ void osSendFrameStrided(const uint16_t *px, int w, int h, int stridePx);
 void osSendAudio(const uint8_t *pcm, int len);
 int osTakeFrameskip(void); /* -1 if unchanged since last call */
 /* Menu ROM index requested over serial, or -1. Lets bench.py start a specific
- * game from reset; the menu is otherwise touch/BOOT only, which no host script
+ * game from reset; the menu is otherwise buttons-only, which no host script
  * can drive. */
 int osTakeSerialPick(void);
 
