@@ -854,6 +854,7 @@ int osPollSerial(void) {
       mkdir("/sd/art", 0775);
       FILE *pf = fopen(path, "wb");
       uint32_t got = 0;
+      uint32_t acked = 0;
       uint8_t fbuf[256];
       while (got < fsize) {
         uint32_t want = fsize - got;
@@ -866,6 +867,13 @@ int osPollSerial(void) {
         if (n == 0) break;
         if (pf) fwrite(fbuf, 1, n, pf);
         got += n;
+        /* Flow control: the sender stops at each 6KB window edge until this
+         * ack -- an fwrite stall (FAT allocation on big cards) can no longer
+         * overflow the 8KB USB rx buffer and silently drop bytes. */
+        if (got - acked >= 6144 || got == fsize) {
+          printf("PUTACK %u\n", (unsigned)got);
+          acked = got;
+        }
       }
       if (pf) fclose(pf);
       printf("PUTFILE %s %u/%u %s\n", path, (unsigned)got, (unsigned)fsize,
