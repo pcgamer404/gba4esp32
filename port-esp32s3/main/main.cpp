@@ -312,6 +312,12 @@ extern "C" void app_main() {
     audioSetVolume(vol);
   }
 
+  /* Power state at boot: one line so a host (or a log reader) can sanity-check
+   * the battery wiring and charge detection without the on-screen gauge. */
+  osUsbPresent(); /* prime the SOF delta */
+  delayMS(250);
+  printf("POWER: battery=%dmV usb=%d\n", osBatteryMv(), osUsbPresent());
+
   static char flashed[260] = {0};
   bool haveFlashed = romGetFlashed(flashed, sizeof(flashed));
   /* Which game ends up running, for the save file name. */
@@ -950,10 +956,11 @@ extern "C" void app_main() {
         lcdBlitRegion((uint8_t *)dbgStrip, GBA_X_OFF, GBA_Y_OFF - 12, 240, 10);
       }
       printf("BENCH t=%lus emu=%d.%d draw=%d cpu=%d%% wait=%d%% apu=%d%% "
-             "w_spr=%d%% w_bg=%d%% w_tile=%d%% w_mix=%d%% cpiT=%d cpiA=%d arm=%d%% DISPCNT=%02x%02x\n",
+             "w_spr=%d%% w_bg=%d%% w_tile=%d%% w_mix=%d%% cpiT=%d cpiA=%d arm=%d%% DISPCNT=%02x%02x "
+             "bat=%dmV usb=%d\n",
              (unsigned long)(now * portTICK_PERIOD_MS / 1000), emuCentiFps / 10,
              emuCentiFps % 10, fps, pCpu, pGfx, pApu, pSpr, pBg, pTile, pMix, cpiT, cpiA, armPct,
-             ioMem[1], ioMem[0]);
+             ioMem[1], ioMem[0], batteryMv, usbPowered);
     }
   }
 }

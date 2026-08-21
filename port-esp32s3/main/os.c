@@ -596,35 +596,58 @@ static volatile uint32_t serialKeys = 0;
 
 /* Battery voltage: GPIO9 = ADC1_CH8 behind a 1:2 divider (schematic R14/R15),
  * so the pack voltage is twice the pin reading. Shared by the menu gauge and
- * the in-game debug strip. */
+ * the in-game debug strip. Uses the chip's factory eFuse ADC calibration when
+ * present (real millivolts); the raw formula is the ~+-10% fallback. Averages
+ * 8 samples -- the speaker amp shares the rail and single reads jitter. */
 #include "driver/adc.h"
+#include "esp_adc_cal.h"
 int osBatteryMv(void) {
   static bool adcInited = false;
+  static bool haveCal = false;
+  static esp_adc_cal_characteristics_t cal;
   if (!adcInited) {
     adc1_config_width(ADC_WIDTH_BIT_12);
     adc1_config_channel_atten(ADC1_CHANNEL_8, ADC_ATTEN_DB_11);
+    haveCal = esp_adc_cal_characterize(ADC_UNIT_1, ADC_ATTEN_DB_11,
+                                       ADC_WIDTH_BIT_12, 0,
+                                       &cal) != ESP_ADC_CAL_VAL_DEFAULT_VREF;
     adcInited = true;
   }
-  int raw = adc1_get_raw(ADC1_CHANNEL_8);
-  if (raw < 0) {
-    return -1;
+  int acc = 0;
+  for (int i = 0; i < 8; i++) {
+    int raw = adc1_get_raw(ADC1_CHANNEL_8);
+    if (raw < 0) {
+      return -1;
+    }
+    acc += raw;
   }
-  /* 11dB attenuation full-scale ~3.1V over 12 bits; x2 for the divider. */
-  return raw * 2 * 3100 / 4095;
+  int raw = acc / 8;
+  int pinMv = haveCal ? (int)esp_adc_cal_raw_to_voltage(raw, &cal)
+                      : raw * 3100 / 4095;
+  return pinMv * 2;
 }
 
 /* USB power detect: a connected host sends SOF every 1ms, ticking the
- * USB-Serial-JTAG frame counter. Callers poll at 1Hz or slower, so any
- * change between calls means a live host = charging over USB. */
+ * USB-Serial-JTAG frame counter. The delta needs real time between reads, so
+ * the check runs at most every 200ms and calls in between get the cached
+ * answer -- back-to-back calls (menu draws the gauge twice per frame) would
+ * otherwise see a frozen counter and flicker "no host". */
 #include "soc/usb_serial_jtag_reg.h"
+#include "esp_timer.h"
 int osUsbPresent(void) {
   static uint32_t lastFrame = 0xFFFFFFFF;
   static int present = 0;
+  static int64_t lastCheckUs = 0;
+  int64_t now = esp_timer_get_time();
+  if (lastCheckUs != 0 && now - lastCheckUs < 200000) {
+    return present;
+  }
   uint32_t cur = REG_READ(USB_SERIAL_JTAG_FRAM_NUM_REG);
   if (lastFrame != 0xFFFFFFFF) {
     present = (cur != lastFrame);
   }
   lastFrame = cur;
+  lastCheckUs = now;
   return present;
 }
 static volatile int pendingFrameskip = -1;

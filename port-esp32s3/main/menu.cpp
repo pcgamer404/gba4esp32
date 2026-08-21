@@ -488,10 +488,11 @@ static void drawLibrary(void) {
    * host is powering the board, else the pack voltage. */
   {
     int mv = osBatteryMv();
+    int chg = osUsbPresent();
     if (mv > 9990) mv = 9990;   /* bound %d so snprintf provably fits */
     if (mv < 0) mv = 0;
     char batt[16];
-    if (osUsbPresent()) {
+    if (chg) {
       snprintf(batt, sizeof(batt), "CHG %d.%02dV", mv / 1000,
                (mv % 1000) / 10);
     } else if (mv > 0) {
@@ -501,7 +502,7 @@ static void drawLibrary(void) {
     }
     int w = (int)strlen(batt) * 8;
     menuText(LCD_W - 140 - w, MENU_H - 10, batt,
-             osUsbPresent() ? 0x07E0 : mv < 3500 ? 0xF800 : 0x7BEF);
+             chg ? 0x07E0 : mv < 3500 ? 0xF800 : 0x7BEF);
   }
 
   /* Last so nothing overdraws it. */
