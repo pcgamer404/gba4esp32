@@ -960,19 +960,66 @@ static void espgba_bad_jump(void)
    CPUReset();
 }
 
+/* Entry signature of the m4a SoundMainRAM this translation was built from:
+ * ldrb r3,[r0,#5]; cmp r3,#0; beq; adr r1; bx r1 -- byte-identical across
+ * the gen-3 titles (whole 0x3A0-byte body verified identical in Ruby,
+ * Sapphire, FireRed, LeafGreen and both Emeralds, J and U). */
+static const u8 kMixerSig[10] = {0x43, 0x79, 0x00, 0x2b, 0x2c,
+                                 0xd0, 0x01, 0xa1, 0x08, 0x47};
+
+/* The entry signature alone is NOT proof of eligibility: Advance Wars,
+ * FFVI, Fire Emblem, Golden Sun, Kirby NiDL and Sonic Advance 2 ship a
+ * different m4a revision that shares the first 0xB0 bytes and then
+ * diverges -- an entry-only match would run this translation against
+ * foreign code. Eligibility is a hash of the FULL 0x3A0 image (FNV-1a-64
+ * of the gen-3 SoundMainRAM; a fingerprint, so no game bytes ship in this
+ * repo). Verified across Ruby/Sapphire/FireRed/LeafGreen/Emerald J+U. */
+#define MIXER_IMG_LEN 0x3A0
+#define MIXER_IMG_FNV 0xf5f45f017f9f2b32ull
+
+static u64 mixerImageHash(const u8 *p)
+{
+   u64 h = 0xcbf29ce484222325ull;
+   for (u32 i = 0; i < MIXER_IMG_LEN; i++) {
+      h = (h ^ p[i]) * 0x100000001b3ull;
+   }
+   return h;
+}
+
+/* Find the mixer wherever this game copied it into IWRAM and hook it.
+ * Replaces the old per-game address table: the link address varies per
+ * cart, the code does not. Called by the port while unarmed. Only an
+ * image hash-identical to the translation source arms; other m4a
+ * revisions fall through to the interpreter, silently and correctly. */
+extern "C" void espgba_hle_scan(void)
+{
+   u32 found[2];
+   int n = 0;
+   for (u32 off = 0; off + MIXER_IMG_LEN <= 0x8000 && n < 2; off += 2) {
+      if (internalRAM[off] == kMixerSig[0] &&
+          memcmp(internalRAM + off, kMixerSig, sizeof(kMixerSig)) == 0 &&
+          mixerImageHash(internalRAM + off) == MIXER_IMG_FNV) {
+         found[n++] = 0x03000000u + off;
+      }
+   }
+   if (n > 0)
+      espgba_hle_pc = found[0];
+   if (n > 1)
+      espgba_hle_pc2 = found[1];
+}
+
 static bool espgba_m4a_native(void)
 {
-   /* One-time on first fire: the code AT the hook must be the exact mixer
-    * this translation was built from (entry: ldrb r3,[r0,#5]; cmp; beq;
-    * adr r1; bx r1 -- byte-identical across the gen-3 titles we cover).
-    * Anything else at that address means the table PC is wrong for this
-    * cart image: disarm forever instead of mixing with garbage state. */
+   /* One-time on first fire: the WHOLE image at the hook must equal the
+    * mixer this translation was built from. An entry-only check is not
+    * enough -- several m4a revisions share the entry and diverge at +0xB0,
+    * and mixing through the wrong one corrupts game state. Anything else at
+    * that address disarms instead of mixing with garbage. */
    {
-      static const u8 kMixerSig[10] = {0x43, 0x79, 0x00, 0x2b, 0x2c,
-                                       0xd0, 0x01, 0xa1, 0x08, 0x47};
       static u32 verifiedPc = 0;
       if (verifiedPc != bus.armNextPC) {
-         if (memcmp(m4aPtr(bus.armNextPC), kMixerSig, sizeof(kMixerSig)) != 0) {
+         const u8 *code = m4aPtr(bus.armNextPC);
+         if (code == NULL || mixerImageHash(code) != MIXER_IMG_FNV) {
             printf("HLE: code at 0x%08x is not the known mixer -- disarmed\n",
                    (unsigned)bus.armNextPC);
             espgba_hle_pc = 1;

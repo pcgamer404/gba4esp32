@@ -61,6 +61,7 @@ int frameDrawn = 0;
 uint32_t frameCount = 0;
 uint32_t blitCount = 0;  /* frames that actually reached the panel */
 int showFps = 1;      /* on-screen counter */
+static uint8_t hleWanted = 1; /* "ui"/"hle" setting: arm the native mixer */
 int lastDrawFps = 0;
 int lastEmuFps = 0; /* whole fps; the overlay shows emu/drawn side by side */
 /* On-glass telemetry: emu/drawn cpu%% wait%% arm%% -- the only BENCH that
@@ -370,13 +371,30 @@ extern "C" void app_main() {
         haveFlashed = false;   /* NVS record was invalidated by the copy */
         delayMS(2500);         /* leave the error on screen long enough to read */
       }
-    } else {
+    } else if (haveFlashed) {
       menuMessage("no .gba in /sd/roms", "using flashed rom");
       delayMS(2500);
+    } else {
+      menuMessage("no .gba in /sd/roms", "add games, then reboot");
+      delayMS(15000);
+      esp_restart();
     }
-  } else {
+  } else if (haveFlashed) {
     menuMessage("no sd card", "using flashed rom");
     delayMS(2500);
+  } else {
+    /* No card AND no recorded game: there is nothing legitimate to boot.
+     * The old fallthrough flat-mapped whatever bytes the partition held --
+     * on this board that was a Ruby image from an old partition layout,
+     * which passed the header check and "ran" as a black screen. Park and
+     * retry the card instead; a reseated card recovers by itself. */
+    while (1) {
+      menuMessage("no sd card", "insert card; retrying...");
+      delayMS(5000);
+      if (sdMount()) {
+        esp_restart(); /* clean boot with the card present */
+      }
+    }
   }
 
   spi_flash_mmap_handle_t outHandle;
@@ -489,7 +507,17 @@ extern "C" void app_main() {
     extern uint32_t espgba_rom_size;
     espgba_rom_size = want * 0x10000u;
   } else {
-    /* No page map recorded (old copy): fall back to a flat mapping. */
+    /* No page map recorded. Legitimate only for a pre-sparse flat flash,
+     * which always has a name record; without one this partition's bytes
+     * are leftovers from older layouts and must not be booted no matter
+     * how plausible their header looks (learned the hard way: a stale
+     * Ruby image passed every header check). */
+    if (!haveFlashed) {
+      printf("rom: no page map and no flashed record -- refusing stale flash\n");
+      menuMessage("nothing in flash", "pick a game from the sd card");
+      delayMS(15000);
+      esp_restart();
+    }
     uint32_t mapSize = romGetFlashedSize();
     if (mapSize == 0 || mapSize > partition->size) {
       mapSize = partition->size;
@@ -561,6 +589,11 @@ extern "C" void app_main() {
   if (rom[0xB2] != 0x96) {
     printf("rom: no valid GBA header (0xB2=0x%02x) -- flash is empty or stale\n",
            rom[0xB2]);
+    /* Whatever NVS says is flashed, it is not runnable -- clear the record
+     * so the menu stops offering an instant resume into garbage. This is
+     * what recovers automatically after a partition-layout change. */
+    extern void romInvalidateFlashed(void);
+    romInvalidateFlashed();
     menuMessage("no game in flash", "insert sd card / pick a game");
     /* Slow cycle on purpose: with a dead SD there is nothing to do but wait
      * for a reseat, and a 15s period keeps the console readable instead of
@@ -591,48 +624,35 @@ extern "C" void app_main() {
     saveInit(runningName);
   }
   /* Per-game idle-loop skip PC. Priority: NVS override (set once over serial
-   * after a hot-PC histogram run), else the baked table below -- addresses
-   * found by searching each ROM for the exact vblank-spin byte pattern
-   * (ldrh [r2,#0x1c]; adds; ands; cmp; beq -8), which is 46.6%% of all
-   * execution when interpreted. Ruby (AXVJ) has no exact match: needs a
-   * live histogram run before it earns an entry. */
+   * after a hot-PC histogram run), else a one-time scan of the cart for the
+   * gen-3 vblank busy-wait, byte-exact (thumb):
+   *   ldrh r1,[r2,#0x1c]; adds r0,r3,#0; ands r0,r1; cmp r0,#0; beq .-8
+   * which is 46.6%% of all execution when interpreted. The scan replaces the
+   * old two-entry game-code table so any cart carrying this engine gets the
+   * skip (verified: 0x080008c6 in Emerald J+U, 0x080008aa in FireRed and
+   * LeafGreen J -- one match each, none anywhere else in those images).
+   * Only a unique, halfword-aligned match arms; Ruby/Sapphire use an older
+   * wait loop, scan clean, and correctly stay unarmed. */
   {
     extern uint32_t espgba_idle_pc;
-    static const struct { char code[5]; uint32_t pc; } idleTable[] = {
-        {"BPEJ", 0x080008c6}, /* Pocket Monsters Emerald (Japan) */
-        {"BPRJ", 0x080008aa}, /* Pocket Monsters FireRed (Japan) */
-    };
-    /* Native m4a mixer entries (verified per game: mic A/B + soak). Emerald
-     * ships two engine instances; both hook the same native code. FireRed
-     * needs its own IWRAM dump before it earns entries here. */
-    static const struct { char code[5]; uint32_t pc, pc2; } hleTable[] = {
-        {"BPEJ", 0x03001b50, 1}, /* Emerald (J) */
-        {"BPRJ", 0x03002918, 1}, /* FireRed (J) -- verified live, own address */
-    };
     {
       extern uint32_t espgba_hle_pc, espgba_hle_pc2;
       nvs_handle_t uih;
       /* Ship defaults: native mixer on (pure win), debug overlay off
        * (Select+Up toggles it in-game). */
-      uint8_t hleOn = 1, dbgOn = 0;
+      uint8_t dbgOn = 0;
+      hleWanted = 1;
       if (nvs_open("ui", NVS_READONLY, &uih) == ESP_OK) {
-        nvs_get_u8(uih, "hle", &hleOn);
+        nvs_get_u8(uih, "hle", &hleWanted);
         nvs_get_u8(uih, "dbg", &dbgOn);
         nvs_close(uih);
       }
       showFps = dbgOn;
-      char k2[5] = {0};
-      memcpy(k2, rom + 0xAC, 4);
-      if (hleOn) {
-        for (unsigned i = 0; i < sizeof(hleTable) / sizeof(hleTable[0]); i++) {
-          if (memcmp(k2, hleTable[i].code, 4) == 0) {
-            espgba_hle_pc = hleTable[i].pc;
-            espgba_hle_pc2 = hleTable[i].pc2;
-            printf("HLE: native m4a mixer armed for %s\n", k2);
-            break;
-          }
-        }
-      }
+      /* The mixer itself is hooked by scanning IWRAM once the game has
+       * copied its m4a engine there -- see the frame loop. Nothing to do
+       * at start beyond honouring the setting. */
+      (void)espgba_hle_pc;
+      (void)espgba_hle_pc2;
     }
     char key[5] = {0};
     memcpy(key, rom + 0xAC, 4);
@@ -640,11 +660,24 @@ extern "C" void app_main() {
       if (key[i] < 0x21 || key[i] > 0x7E) key[i] = '_';
     }
     uint32_t pc = 0;
-    const char *src = "table";
-    for (unsigned i = 0; i < sizeof(idleTable) / sizeof(idleTable[0]); i++) {
-      if (memcmp(key, idleTable[i].code, 4) == 0) {
-        pc = idleTable[i].pc;
-        break;
+    const char *src = "scan";
+    {
+      extern uint32_t espgba_rom_size;
+      static const uint8_t kSpin[10] = {0x91, 0x8b, 0x18, 0x1c, 0x08,
+                                        0x40, 0x00, 0x28, 0xfa, 0xd0};
+      uint32_t limit = espgba_rom_size;
+      if (limit > 0x1000000) limit = 0x1000000;
+      int matches = 0;
+      for (uint32_t off = 0; off + sizeof(kSpin) <= limit; off += 2) {
+        if (rom[off] == kSpin[0] &&
+            memcmp(rom + off, kSpin, sizeof(kSpin)) == 0) {
+          if (matches++ == 0) {
+            pc = 0x08000000u + off;
+          }
+        }
+      }
+      if (matches != 1) {
+        pc = 0; /* none or ambiguous: run without the skip */
       }
     }
     nvs_handle_t h;
@@ -723,8 +756,16 @@ extern "C" void app_main() {
     }
 
     if (req & (OS_REQ_HLE_ON | OS_REQ_HLE_OFF)) {
-      extern uint32_t espgba_hle_pc, espgba_hle_hits, espgba_hle_bails;
-      espgba_hle_pc = (req & OS_REQ_HLE_ON) ? 0x03001b50 : 1;
+      extern uint32_t espgba_hle_pc, espgba_hle_pc2, espgba_hle_hits,
+          espgba_hle_bails;
+      /* OFF must also stop the discovery rescan or it re-arms in ~5s; ON
+       * leaves arming to the scan so the address is this cart's, not a
+       * remembered one. */
+      hleWanted = (req & OS_REQ_HLE_ON) ? 1 : 0;
+      if (!hleWanted) {
+        espgba_hle_pc = 1;
+        espgba_hle_pc2 = 1;
+      }
       printf("HLE: native m4a mixer %s (hits=%u bails=%u)\n",
              (req & OS_REQ_HLE_ON) ? "ON" : "OFF",
              (unsigned)espgba_hle_hits, (unsigned)espgba_hle_bails);
@@ -745,9 +786,13 @@ extern "C" void app_main() {
         for (uint32_t j = 0; j < 32 && o + j < pl; j++) {
           uint32_t a = pa + o + j;
           uint8_t b = 0xEE;
+          extern uint8_t paletteRAM[0x400], oam[0x400];
           switch (a >> 24) {
             case 0x02: b = workRAM[a & 0x3FFFF]; break;
             case 0x03: b = internalRAM[a & 0x7FFF]; break;
+            case 0x05: b = paletteRAM[a & 0x3FF]; break;
+            case 0x06: b = vram[a & 0x1FFFF]; break;
+            case 0x07: b = oam[a & 0x3FF]; break;
             case 0x08: case 0x09: b = rom[a & 0x1FFFFFF]; break;
             default: break;
           }
@@ -790,6 +835,28 @@ extern "C" void app_main() {
           printf("CLK: auto overclock engaging (delayed)\n");
           clkHoldNow();
         }
+      }
+    }
+
+    /* Native m4a mixer, armed by discovery instead of a per-game table: the
+     * game copies its SoundMainRAM into IWRAM early on; scanning for its
+     * entry signature finds it wherever this cart linked it, so any gen-3
+     * era ROM gets the native mixer (body verified byte-identical across
+     * Ruby/Sapphire/FireRed/LeafGreen/Emerald J+U). Rescan every ~5s while
+     * unarmed -- also re-arms after the fire-time signature check disarms a
+     * stale hook (game reloaded its engine elsewhere). */
+    if (hleWanted) {
+      extern uint32_t espgba_hle_pc, espgba_hle_pc2;
+      extern void espgba_hle_scan(void);
+      static uint32_t hleAnnounced = 0;
+      if (espgba_hle_pc == 1 && (frameCount % 300) == 60) {
+        espgba_hle_scan();
+      }
+      if (espgba_hle_pc != 1 && hleAnnounced != espgba_hle_pc) {
+        hleAnnounced = espgba_hle_pc;
+        printf("HLE: native m4a mixer armed at 0x%08x%s (scan)\n",
+               (unsigned)espgba_hle_pc,
+               espgba_hle_pc2 != 1 ? " (+second engine)" : "");
       }
     }
 
@@ -930,6 +997,11 @@ extern "C" void app_main() {
       // Verify the game is actually reaching the glass: sample the middle of
       // the GBA window straight out of panel RAM.
       lcdProbeRow(GBA_X_OFF + 100, GBA_Y_OFF + 80, 8);
+      /* And that the panel still holds its config: a glitched controller
+       * shows backlight white forever while the game runs on. Re-init it. */
+      if (lcdPanelCheck()) {
+        printf("LCD: panel was reinitialised; picture restored\n");
+      }
 #endif
       /* Cycle split from the core's PROF counters: percent of wall-clock CPU
        * time spent in instruction execution / PPU line render / APU tick.
@@ -977,11 +1049,11 @@ extern "C" void app_main() {
       }
       printf("BENCH t=%lus emu=%d.%d draw=%d cpu=%d%% wait=%d%% apu=%d%% "
              "w_spr=%d%% w_bg=%d%% w_tile=%d%% w_mix=%d%% cpiT=%d cpiA=%d arm=%d%% DISPCNT=%02x%02x "
-             "bat=%dmV usb=%d keys=%03x\n",
+             "BLD=%02x%02x,%02x bat=%dmV usb=%d keys=%03x\n",
              (unsigned long)(now * portTICK_PERIOD_MS / 1000), emuCentiFps / 10,
              emuCentiFps % 10, fps, pCpu, pGfx, pApu, pSpr, pBg, pTile, pMix, cpiT, cpiA, armPct,
-             ioMem[1], ioMem[0], batteryMv, usbPowered,
-             (unsigned)(osReadKey() & 0x3FF));
+             ioMem[1], ioMem[0], ioMem[0x51], ioMem[0x50], ioMem[0x54],
+             batteryMv, usbPowered, (unsigned)(osReadKey() & 0x3FF));
     }
   }
 }
