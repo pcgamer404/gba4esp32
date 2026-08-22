@@ -425,6 +425,32 @@ static void lcdInitILI9341(void) {
   delayMS(120);
   lcdCmd8(0x29);  // DISPON
 }
+
+/* Panel watchdog. A glitched controller (SPI overdrive, ESD, power dip)
+ * resets to its power-on state: display off, config gone -- the glass shows
+ * backlight white while the emulator keeps blitting frames it will never
+ * show. Reads on this panel are proven trustworthy (lcdSelfTest tracks two
+ * different MADCTL writes), so RDDMADCTL != the 0x28 we programmed is a
+ * reliable "panel lost its mind" signal. Two consecutive bad reads trigger a
+ * full re-init; the next blit then restores the picture in under a second
+ * instead of leaving a white screen until power-cycle. */
+int lcdPanelCheck(void) {
+  static int bad = 0;
+  uint8_t v = 0;
+  lcdReadReg(0x0B, &v, 1);
+  if (v == 0x28) {
+    bad = 0;
+    return 0;
+  }
+  if (++bad < 2) {
+    return 0;
+  }
+  bad = 0;
+  ESP_LOGW("LCD", "panel config lost (MADCTL=%02x) -- reinitialising", v);
+  lcdInitILI9341();
+  lcdFillScreen(0x0000);
+  return 1;
+}
 #endif
 
 void lcdInit() {
@@ -660,6 +686,7 @@ int osBatteryMv(void) {
  * answer -- back-to-back calls (menu draws the gauge twice per frame) would
  * otherwise see a frozen counter and flicker "no host". */
 #include "soc/usb_serial_jtag_reg.h"
+#include "hal/usb_serial_jtag_ll.h"
 #include "esp_timer.h"
 int osUsbPresent(void) {
   static uint32_t lastFrame = 0xFFFFFFFF;
@@ -742,6 +769,14 @@ void osSerialInit(void) {
       .tx_buffer_size = 8192,
       .rx_buffer_size = 8192,
   };
+  /* The driver serves RX ONLY. Console stays on the vfs raw nonblocking
+   * path, and the binary dumps below go through the same raw FIFO inline --
+   * so the peripheral has exactly ONE transmit feeder, always in the frame
+   * loop's task. Both other arrangements failed in the field: dumps via the
+   * driver raced the raw console (TX wedged mid-dump, device off the bus),
+   * and routing the console through the driver too wedged TX permanently
+   * the first time nobody on the host was reading (buffered prints filled
+   * the ring; IDF 4.4's driver never recovers when a reader returns). */
   usbSerialUp = usb_serial_jtag_driver_install(&ucfg) == ESP_OK;
   printf("SERIAL: UART0 + usb_serial_jtag (%s)\n",
          usbSerialUp ? "up" : "install failed");
@@ -761,9 +796,27 @@ static int serialRead1(uint8_t *b, TickType_t ticks) {
 void osSerialWriteRaw(const void *buf, int len);
 
 static void serialWrite(const void *buf, int len) {
-  if (usbSerialUp) {
-    usb_serial_jtag_write_bytes((const char *)buf, len, pdMS_TO_TICKS(2000));
-  } /* else: 278-hold, output dropped -- UART0 pins belong to the buttons */
+  if (!usbSerialUp) {
+    return; /* 278-hold, output dropped -- UART0 pins belong to the buttons */
+  }
+  /* Raw FIFO, inline, from this task -- never the driver's TX ringbuffer
+   * (see osSerialInit). Drop-on-stall: dumps are only ever requested by a
+   * live host, so a 100ms stall means the host went away mid-transfer and
+   * the rest of the frame is garbage to everyone; losing it keeps the GAME
+   * running instead of blocking the loop. */
+  const uint8_t *p = (const uint8_t *)buf;
+  int64_t lastProgress = esp_timer_get_time();
+  while (len > 0) {
+    uint32_t n = usb_serial_jtag_ll_write_txfifo(p, (uint32_t)len);
+    usb_serial_jtag_ll_txfifo_flush();
+    if (n > 0) {
+      p += n;
+      len -= (int)n;
+      lastProgress = esp_timer_get_time();
+    } else if (esp_timer_get_time() - lastProgress > 100000) {
+      return;
+    }
+  }
 }
 
 void osSerialWriteRaw(const void *buf, int len) { serialWrite(buf, len); }

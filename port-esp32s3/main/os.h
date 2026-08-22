@@ -11,6 +11,7 @@ void lcdBlitRegion(uint8_t *buf, int x, int y, int w, int h);      /* blocking *
 void lcdBlitRegionAsync(uint8_t *buf, int x, int y, int w, int h); /* queued; CS released by lcdWaitFB */
 void lcdSelfTest(void);
 void lcdProbeRow(int x, int y, int n);
+int lcdPanelCheck(void); /* re-init a glitched panel; 1 = it was reset */
 void lcdPanelDump(void); /* stream whole panel RAM in SHOT format */ /* read panel RAM back */            /* read back panel ID/MADCTL/pixel format */
 void lcdFillScreen(uint16_t colour); /* full-panel fill, sized from LCD_W/LCD_H */
 void delayMS(int ms);
