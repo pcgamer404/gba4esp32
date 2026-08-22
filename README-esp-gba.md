@@ -3,6 +3,10 @@
 [44vba](https://github.com/44670/44vba) (a `vba-next` fork) running on this ESP32-S3 board,
 built with PlatformIO instead of a system ESP-IDF install.
 
+**Just want to put it on the board? See [FLASHING.md](FLASHING.md)** —
+step-by-step for Linux and Windows, including the SD card layout. The rest
+of this file is the development story.
+
 Upstream files are untouched except for one added stub (`port-esp32s3/main/config.h`).
 Everything else here is additive: `platformio.ini`, `sdkconfig.defaults`, `partitions.csv`,
 `components/gba/`, `tools/`.
