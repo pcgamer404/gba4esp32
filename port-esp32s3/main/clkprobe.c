@@ -295,15 +295,16 @@ void clkAutoSet(bool on) {
  * jump, LCD SPI 46 MHz, SD +16%. Isolates "the overclock" from "drivers
  * initialized under the overclock". USB serial dies here. */
 bool clkHoldNow(void) {
-  /* x13 = 260 MHz, NOT x14/278: at x14 the PSRAM runs 16%% over spec and the
-   * renderer ring now lives there -- measured as an instant INT_WDT crash
-   * loop on every game start. x13 keeps PSRAM at 86.7 MHz (+8%%), stable. */
-  printf("CLK: live-switching to 260 MHz NOW -- serial dies, watch the LCD\n");
+  /* x14 = 278 MHz. This was capped at x13/260 while the threaded renderer's
+   * ring lived in PSRAM (x14 overdrove it 16%% and INT_WDT-crashed every
+   * game start); the ring left with THREADED_RENDERER=0, so the full hold
+   * is usable again. stressOk() below still reverts to 240 on failure. */
+  printf("CLK: live-switching to 278 MHz NOW -- serial dies, watch the LCD\n");
   fflush(stdout);
   vTaskDelay(pdMS_TO_TICKS(100));
   osSerialMarkDead();
   uint32_t oc = 0;
-  bool stayed = excursion(480, 13, 2, 260, 2, true, &oc);
+  bool stayed = excursion(480, 14, 2, 278, 2, true, &oc);
   if (stayed) {
     s_holdMagic = CLK_MAGIC;
     s_holdMhz = oc;

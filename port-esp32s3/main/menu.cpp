@@ -380,6 +380,10 @@ static void menuSettings(void) {
   menuRender(drawSettings);
   uint32_t lastKeys = 0xFFFFFFFF; /* force release before first press */
   while (1) {
+    /* Serial keys work here too, so a host can drive the settings screen
+     * (the picker polls; this loop previously did not, which froze any
+     * remote session the moment settings opened). */
+    osPollSerial();
     /* BOOT button, for units without the matrix: short = next row,
      * long = toggle (or adjust volume up; it wraps), on Back = leave. */
     int p = buttonPoll();
