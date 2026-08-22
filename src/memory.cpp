@@ -684,6 +684,18 @@ bool rtcWrite(u32 address, u16 value)
 
                               time( &long_time );                /* Get time as long integer. */
                               newtime = localtime( &long_time ); /* Convert to local time. */
+#ifndef ESP_PLATFORM
+                              /* Lockstep differs need identical RTC reads
+                               * across runs minutes apart. */
+                              if (getenv("ESPGBA_FIXED_TIME")) {
+                                 static struct tm fixed;
+                                 fixed.tm_year = 126; fixed.tm_mon = 7;
+                                 fixed.tm_mday = 22;  fixed.tm_wday = 6;
+                                 fixed.tm_hour = 12;  fixed.tm_min = 0;
+                                 fixed.tm_sec = 0;
+                                 newtime = &fixed;
+                              }
+#endif
 
                               rtcClockData.dataLen = 7;
                               rtcClockData.data[0] = toBCD(newtime->tm_year);
@@ -703,6 +715,18 @@ bool rtcWrite(u32 address, u16 value)
 
                               time( &long_time );                /* Get time as long integer. */
                               newtime = localtime( &long_time ); /* Convert to local time. */
+#ifndef ESP_PLATFORM
+                              /* Lockstep differs need identical RTC reads
+                               * across runs minutes apart. */
+                              if (getenv("ESPGBA_FIXED_TIME")) {
+                                 static struct tm fixed;
+                                 fixed.tm_year = 126; fixed.tm_mon = 7;
+                                 fixed.tm_mday = 22;  fixed.tm_wday = 6;
+                                 fixed.tm_hour = 12;  fixed.tm_min = 0;
+                                 fixed.tm_sec = 0;
+                                 newtime = &fixed;
+                              }
+#endif
 
                               rtcClockData.dataLen = 3;
                               rtcClockData.data[0] = toBCD(newtime->tm_hour);

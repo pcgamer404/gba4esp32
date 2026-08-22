@@ -366,8 +366,12 @@ static void hardware_reset() {
  * emulated context (the host register dump cannot show it) and reset the
  * GAME instead of crashing the machine. */
 static void espgba_bad_jump(void);
+#ifdef ESP_PLATFORM
 #define ESPGBA_JUMP_GUARD \
     if (!map[(bus.armNextPC >> 24) & 15].address) { espgba_bad_jump(); }
+#else
+#define ESPGBA_JUMP_GUARD /* host: let it fault loudly under a debugger */
+#endif
 
 #define ARM_PREFETCH \
   {\
@@ -903,6 +907,78 @@ extern "C" uint32_t espgba_hle_hits;
 uint32_t espgba_hle_hits;
 extern "C" uint32_t espgba_hle_bails;
 uint32_t espgba_hle_bails;
+#endif /* ESP_PLATFORM (reopened below; hash + AOT state are host-capable) */
+
+#ifndef ESP_PLATFORM
+/* First-N-instructions trace for host differs (env ESPGBA_TRACE_N). */
+static long espgba_trace_left = -2;
+extern "C" void espgba_trace(u32 pc)
+{
+   if (espgba_trace_left == -2) {
+      const char *e = getenv("ESPGBA_TRACE_N");
+      espgba_trace_left = e ? atol(e) : -1;
+   }
+   if (espgba_trace_left <= 0)
+      return;
+   espgba_trace_left--;
+   fprintf(stderr, "T %08x r0=%08x r1=%08x tk=%d ct=%d pfc=%d pf=%d\n",
+           pc, bus.reg[0].I, bus.reg[1].I, (int)cpuTotalTicks,
+           (int)clockTicks, (int)bus.busPrefetchCount,
+           bus.busPrefetch ? 1 : 0);
+}
+#define ESPGBA_TRACE(pc) espgba_trace(pc)
+#else
+#define ESPGBA_TRACE(pc)
+#endif
+
+#ifndef ESP_PLATFORM
+__attribute__((noinline)) static void espgba_watch8(u32 address, u8 b)
+{
+   fprintf(stderr, "W %08x <= %02x @pc=%08x\n", address, b,
+           (unsigned)bus.armNextPC);
+}
+#endif
+
+/* Frame-state fingerprint for lockstep differs: everything the CPU and
+ * PPU can observe. Two builds fed identical input must produce identical
+ * streams; the first diverging frame localizes a translation bug. */
+extern "C" u64 espgba_state_hash(void)
+{
+   u64 h = 0xcbf29ce484222325ull;
+   #define HFEED(p, n) do { const u8 *_q = (const u8 *)(p);       for (u32 _i = 0; _i < (n); _i++) h = (h ^ _q[_i]) * 0x100000001b3ull;    } while (0)
+   HFEED(bus.reg, sizeof(bus.reg));
+   HFEED(internalRAM, 0x8000);
+   HFEED(workRAM, 0x40000);
+   HFEED(paletteRAM, 0x400);
+   HFEED(oam, 0x400);
+   HFEED(vram, 0x18000);
+   HFEED(ioMem, 0x400);
+   u32 flags = (N_FLAG ? 1 : 0) | (Z_FLAG ? 2 : 0) | (C_FLAG ? 4 : 0) |
+               (V_FLAG ? 8 : 0) | (armState ? 16 : 0) | (holdState ? 32 : 0);
+   HFEED(&flags, 4);
+   #undef HFEED
+   return h;
+}
+
+/* Component hashes for divergence localization (host differ only). */
+extern "C" void espgba_state_hash_parts(char *out, int cap)
+{
+   #define PHASH(name, p, n) do { \
+      u64 _h = 0xcbf29ce484222325ull; \
+      const u8 *_q = (const u8 *)(p); \
+      for (u32 _i = 0; _i < (u32)(n); _i++) _h = (_h ^ _q[_i]) * 0x100000001b3ull; \
+      int _len = snprintf(out, cap, " %s=%04x", name, (unsigned)(_h & 0xFFFF)); \
+      out += _len; cap -= _len; \
+   } while (0)
+   PHASH("reg", bus.reg, sizeof(bus.reg));
+   PHASH("iw", internalRAM, 0x8000);
+   PHASH("ew", workRAM, 0x40000);
+   PHASH("pal", paletteRAM, 0x400);
+   PHASH("oam", oam, 0x400);
+   PHASH("vr", vram, 0x18000);
+   PHASH("io", ioMem, 0x400);
+   #undef PHASH
+}
 
 /* ---- AOT dispatch (tools/aot/xlate.py) ------------------------------- */
 /* Translated Thumb blocks for one contiguous hot window per game. Each
@@ -910,12 +986,15 @@ uint32_t espgba_hle_bails;
  * (semantics and tick charges identical by construction); dispatch is a
  * two-op range check at the loop hook, a dense fn-pointer table inside
  * the window, and NULL entries fall through to the interpreter. */
+#if defined(ESP_PLATFORM) || defined(ESPGBA_AOT_HOST)
 typedef struct { u32 pc; void (*fn)(void); } espgba_aot_entry;
 static void (**espgba_aot_table)(void);
 static u32 espgba_aot_base = 0xFFFFFFFFu; /* miss everything until armed */
 static u32 espgba_aot_span;
 extern "C" uint32_t espgba_aot_hits;
 uint32_t espgba_aot_hits;
+#endif
+#ifdef ESP_PLATFORM
 /* Diagnostic: counts how often the PC passes through espgba_probe_pc in
  * either dispatch loop. No side effects; for locating hook points. */
 extern "C" uint32_t espgba_probe_pc;
@@ -1848,8 +1927,16 @@ static INLINE void CPUWriteHalfWord(u32 address, u16 value)
 	}
 }
 
+#ifndef ESP_PLATFORM
+__attribute__((noinline)) static void espgba_watch8(u32 address, u8 b);
+#endif
 static INLINE void CPUWriteByte(u32 address, u8 b)
 {
+#ifndef ESP_PLATFORM
+   if ((address & 0xFFFFFFF0u) == 0x03007de0u)
+      espgba_watch8(address, b);
+#endif
+
 	switch(address >> 24)
 	{
 		case 2:
@@ -7180,6 +7267,7 @@ static int thumbExecute (void)
 #endif
 
       u32 oldArmNextPC = bus.armNextPC;
+      ESPGBA_TRACE(oldArmNextPC);
 
       bus.armNextPC = bus.reg[15].I;
       bus.reg[15].I += 2;
@@ -7217,7 +7305,18 @@ static int thumbExecute (void)
          if (espgba_m4a_native())
             cpuTotalTicks += 256;
       }
-      if ((u32)(bus.armNextPC - espgba_aot_base) < espgba_aot_span) {
+#endif
+#if defined(ESP_PLATFORM) || defined(ESPGBA_AOT_HOST)
+      /* Dispatch ONLY when the interpreter itself would keep executing:
+       * with an event due, instructions must wait until it is serviced.
+       * Running a block here executed code ahead of pending timer/IRQ/DMA
+       * work -- a timing divergence the lockstep differ caught on the
+       * very first frame. */
+      if (cpuTotalTicks < cpuNextEvent && !armState && !holdState &&
+#ifdef USE_SWITICKS
+          !SWITicks &&
+#endif
+          (u32)(bus.armNextPC - espgba_aot_base) < espgba_aot_span) {
          void (*aot_fn)(void) =
              espgba_aot_table[(bus.armNextPC - espgba_aot_base) >> 1];
          if (aot_fn) {
@@ -12721,10 +12820,18 @@ inline renderfunc_t GetRenderFunc(int mode, int type) {
 		 * on builds carrying USE_TWEAKS state decay AND the threaded ring's
 		 * live-COLEV/COLY race -- both fixed since. Their blend reads now go
 		 * through the per-slot snapshots like every other template. */
+#ifdef ESP_PLATFORM
 		case 0x00: return mode0RenderLineFast;
+#else
+		case 0x00: return mode0RenderLine<renderer_idx>;
+#endif
 		case 0x01: return mode0RenderLineNoWindow<renderer_idx>;
 		case 0x02: return mode0RenderLineAll<renderer_idx>;
+#ifdef ESP_PLATFORM
 		case 0x10: return mode1RenderLineFast;
+#else
+		case 0x10: return mode1RenderLine<renderer_idx>;
+#endif
 		case 0x11: return mode1RenderLineNoWindow<renderer_idx>;
 		case 0x12: return mode1RenderLineAll<renderer_idx>;
 		case 0x20: return mode2RenderLine<renderer_idx>;
@@ -17203,8 +17310,13 @@ void cheatsWriteByte(u32, u8)
  * AOT-translated blocks (tools/aot/xlate.py). Included last: the block
  * bodies call the static thumb handlers above with constant opcodes.
  * ==================================================================== */
+#if defined(ESP_PLATFORM) || defined(ESPGBA_AOT_HOST)
 #ifdef ESP_PLATFORM
 #include "esp_heap_caps.h"
+#else
+#define heap_caps_malloc(sz, caps) malloc(sz)
+#define AOT_HOST_NO_HASH_GATE 1
+#endif
 
 /* One emitted instruction: exactly one interpreter loop iteration minus
  * dispatch, decode and pipeline shuffle. clockTicks is deliberately NOT
@@ -17212,13 +17324,21 @@ void cheatsWriteByte(u32, u8)
  * value in the real loop too (bug-compatible by design). The window is
  * screened at generation time to contain no swi/halt-class ops, so the
  * loop's ct<0 exit cannot occur inside a block. */
+#ifdef ESP_PLATFORM
+#define AOT_COUNT() espgba_insns++
+#else
+#define AOT_COUNT()
+#endif
 #define AOT_STEP(addr, handler, opc, nextaddr)                          \
    do {                                                                 \
+      ESPGBA_TRACE(addr);                                               \
       bus.busPrefetch = false;                                          \
       bus.armNextPC = bus.reg[15].I;                                    \
       bus.reg[15].I += 2;                                               \
+      clockTicks = 0; /* the loop zeroes it per iteration (thumbExecute \
+                       * top) -- a leftover here double-charges ticks */ \
       handler(opc);                                                     \
-      espgba_insns++;                                                   \
+      AOT_COUNT();                                                      \
       if (clockTicks == 0)                                              \
          clockTicks = codeTicksAccessSeq16(addr) + 1;                   \
       cpuTotalTicks += clockTicks;                                      \
@@ -17228,9 +17348,11 @@ void cheatsWriteByte(u32, u8)
 
 /* Refill the pipeline for whatever PC we are leaving at; the interpreter
  * resumes there on the very next loop iteration. */
-#define AOT_EXIT()     \
-   aot_out:            \
-   THUMB_PREFETCH;     \
+#define AOT_EXIT()                                                     \
+   aot_out:                                                            \
+   if (!armState) {                                                    \
+      THUMB_PREFETCH; /* refill for the thumb loop's next iteration */ \
+   } /* else: the bx handler already did ARM_PREFETCH -- keep it */    \
    return
 
 #include "aot_gen_bpej.inc"
@@ -17255,6 +17377,8 @@ extern "C" int espgba_aot_arm(const char *code)
         (int)(sizeof(espgba_aot_bpee) / sizeof(espgba_aot_bpee[0])),
         ESPGBA_AOT_BPEE_BASE, ESPGBA_AOT_BPEE_END, ESPGBA_AOT_BPEE_HASH},
    };
+   if (code == NULL)
+      code = (const char *)rom + 0xAC;
    for (unsigned g = 0; g < sizeof(games) / sizeof(games[0]); g++) {
       if (memcmp(code, games[g].code, 4) != 0)
          continue;
@@ -17262,8 +17386,12 @@ extern "C" int espgba_aot_arm(const char *code)
       u64 h = 0xcbf29ce484222325ull;
       for (u32 i = 0; i < games[g].end - games[g].base; i++)
          h = (h ^ win[i]) * 0x100000001b3ull;
+#ifndef AOT_HOST_NO_HASH_GATE
       if (h != games[g].hash)
          return -1; /* different image (romhack/other rev): stay interpreted */
+#else
+      (void)h; /* host differ runs pristine images; gate is device-side */
+#endif
       u32 span = games[g].end - games[g].base;
       static void (**table_mem)(void);
       static u32 table_cap;
@@ -17277,9 +17405,30 @@ extern "C" int espgba_aot_arm(const char *code)
       }
       memset(table_mem, 0, (span >> 1) * sizeof(void *));
       int armed = 0;
-      for (int i = 0; i < games[g].n; i++) {
-         if (games[g].entries[i].fn == 0)
-            continue; /* sentinel */
+      int limit = games[g].n;
+#ifdef AOT_HOST_NO_HASH_GATE
+      {  /* bisection aid: arm only the first N blocks */
+         const char *lim = getenv("ESPGBA_AOT_LIMIT");
+         if (lim)
+            limit = atoi(lim);
+      }
+      int skip = -1;
+      {  /* bisection aid: skip one block by index */
+         const char *sk = getenv("ESPGBA_AOT_SKIP");
+         if (sk)
+            skip = atoi(sk);
+      }
+      int only = -1;
+      {  /* bisection aid: arm exactly one block */
+         const char *on = getenv("ESPGBA_AOT_ONLY");
+         if (on)
+            only = atoi(on);
+      }
+#endif
+      for (int i = 0; i < games[g].n && i < limit; i++) {
+         if (games[g].entries[i].fn == 0 || i == skip ||
+             (only >= 0 && i != only))
+            continue; /* sentinel or bisection filter */
          table_mem[(games[g].entries[i].pc - games[g].base) >> 1] =
              games[g].entries[i].fn;
          armed++;

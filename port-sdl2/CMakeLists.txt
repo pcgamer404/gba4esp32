@@ -28,6 +28,23 @@ target_include_directories(44gba PRIVATE
     ${SDL2_INCLUDE_DIRS}
 )
 
+add_executable(44gba_aot
+"main.cpp"
+"../src/gba.cpp"
+"../src/memory.cpp"
+"../src/sound.cpp"
+"../src/system.cpp"
+"../src/ui.cpp"
+"../libretro/libretro.cpp"
+)
+target_compile_options(44gba_aot PRIVATE -O3)
+target_compile_definitions(44gba_aot PRIVATE ESPGBA_AOT_HOST)
+target_include_directories(44gba_aot PRIVATE
+    "../src" "../libretro" "../libretro-common/include"
+    ${SDL2_INCLUDE_DIRS}
+)
+target_link_libraries(44gba_aot ${SDL2_LIBRARIES})
+
 target_link_libraries(44gba PRIVATE
     ${SDL2_LIBRARIES}
 )

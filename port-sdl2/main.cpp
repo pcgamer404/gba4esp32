@@ -306,7 +306,43 @@ void emuHandleKey(int key, int down) {
   }
 }
 
+extern "C" unsigned long long espgba_state_hash(void);
+extern "C" void espgba_state_hash_parts(char *out, int cap);
+#ifdef ESPGBA_AOT_HOST
+extern "C" int espgba_aot_arm(const char *code);
+#endif
+
 int main(int argc, char *argv[]) {
+  /* Lockstep differ mode: ESPGBA_ROM=path ESPGBA_HASH_FRAMES=N runs
+   * headless with no input and prints one state hash per frame. Two
+   * builds (interpreter vs AOT) fed the same ROM must match exactly. */
+  const char *hfEnv = getenv("ESPGBA_HASH_FRAMES");
+  const char *hrEnv = getenv("ESPGBA_ROM");
+  if (hfEnv && hrEnv) {
+    setenv("SDL_VIDEODRIVER", "dummy", 1);
+    setenv("SDL_AUDIODRIVER", "dummy", 1);
+    SDL_Init(SDL_INIT_VIDEO);
+    renderer = NULL;
+    if (emuLoadROM(hrEnv) != 0) {
+      fprintf(stderr, "load failed\n");
+      return 2;
+    }
+#ifdef ESPGBA_AOT_HOST
+    {
+      int n = espgba_aot_arm(NULL);
+      fprintf(stderr, "AOT host: %d blocks armed\n", n);
+    }
+#endif
+    int hashN = atoi(hfEnv);
+    for (int i = 0; i < hashN; i++) {
+      frameDrawn = 0;
+      emuRunFrame();
+      char parts[160];
+      espgba_state_hash_parts(parts, sizeof(parts));
+      printf("F%06d %016llx%s\n", i, espgba_state_hash(), parts);
+    }
+    return 0;
+  }
 #ifdef __3DS__
   osSetSpeedupEnable(true);
 #endif
