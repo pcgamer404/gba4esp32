@@ -700,3 +700,18 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   a wedge until esptool connects fine; open quiet, then pulse EN alone.
   (2) `stty -F ... raw -hupcl` + O_NONBLOCK read attaches WITHOUT resetting
   -- the only way to observe a solo-running device after the fact.
+
+## 2026-08-22: threaded renderer re-earned -- the fade bug was two struct fields
+
+- The ring snapshotted BLDMOD per slot but the templates read COLEV/COLY
+  LIVE: core 1 blended queued lines with future fade values. That is the
+  whole "fade-to-white sticks through the threaded ring" mystery. Fields
+  added, 41 blend reads redirected, THREADED_RENDERER=1 again.
+- SHOT-audited: intro fades, flashes, title fade-in/full title, New Game,
+  Birch spotlight (window+blend) -- all pixel-correct through the ring.
+- Emerald US in-game: 24-26 -> 44-47 emu at stock. 278 hold restored
+  (ring left PSRAM with the ship of the synchronous... and returned to
+  internal contexts), engages in-game only. Volume settable over serial
+  (settings loop polls now); overlay/volume/OC all NVS-persistent.
+- Remaining to 60: m4a sequencer AOT (0x8006600 cluster, ~19%), sprite
+  pass, painters (still unrouted, still gated on per-scene audits).
