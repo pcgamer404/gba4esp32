@@ -599,3 +599,104 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   (repaired+detected), fast painters + threaded ring (unrouted), and
   USE_TWEAKS state decay (off). Every one found by making the invisible
   visible: BADJUMP dumps, SHOT, PANELDUMP, PEEK sweeps.
+
+## 2026-08-21 night: Emerald US white TITLE -- the cart never fit in flash
+
+- SYMPTOM: intro plays, title screen is pure white for its whole ~16s, attract
+  loops. FB-level screenshots proved the EMULATOR rendered white (not the
+  panel, not the painters -- both already unrouted; USE_TWEAKS already 0;
+  bisect with idle-skip and HLE mixer disabled reproduced it identically).
+- EVIDENCE CHAIN: PEEK of palette RAM during the white showed all-0x7FFF,
+  then backdrop-white with zeroed palettes -- the game never loaded the title
+  graphics. PEEK sweep of the mapped cart vs the PC file: pages 222-227 read
+  as 0xFF where the file has real data. Emerald US has NO interior 0xFF
+  padding: 228 distinct pages vs the rom partition's 223 slots. The cart
+  NEVER FIT; an earlier pack silently truncated at the capacity wall and the
+  NVS map recorded pages 222-227 as blank. Title assets live there.
+- FIX 1, zero-alias: Emerald US carries 29 all-0x00 pages; they now alias ONE
+  shared zero-filled slot, exactly like 0xFF pages alias erased slot 0
+  (map entry 0xFFFF, slot in NVS romzslot). US Emerald: 201 slots, fits with
+  22 spare. pack_rom.py speaks the same format.
+- FIX 2, cache format v2: .map now starts with "GBAMAP2\0"; headerless caches
+  are ignored and rebuilt (a v1 cache could describe a truncated pack as
+  complete -- the US one did).
+- FIX 3, verify-after-copy: 9 sample pages (always including the LAST real
+  page, where truncation bites) are re-read from SD and from flash through
+  the map after every copy; any mismatch = copy failed, cache deleted.
+  "Copy finished" is no longer taken as "copy correct".
+- FIX 4, discovery replaces tables: idle-skip PC found by scanning the cart
+  for the exact vblank-spin bytes (unique match required; BPEE 0x080008c6,
+  BPGJ gains it too, Ruby/Sapphire correctly scan clean); the native m4a
+  mixer is armed by scanning IWRAM for the mixer entry signature (US links
+  it at 0x03001aa8, JP at 0x03001b50 -- the per-game table missed US
+  entirely; mixer body verified byte-identical across all six gen-3 carts).
+  Any future ROM with this engine gets both without a table edit.
+- FIX 5, panel watchdog: RDDMADCTL is checked once a second in-game; two bad
+  reads = panel lost its config (SPI glitch/ESD class) -> full re-init +
+  re-blit instead of glass-white until power cycle.
+- VERIFIED on hardware: full 512-sample ROM sweep 0 mismatches; title
+  renders (logo, EMERALD VERSION + Rayquaza); START -> New Game -> Birch
+  intro all screenshot-proven. In-game ~24-26 emu at stock 240 (was 10.5
+  with no idle/HLE for US). Also fixed en route: the device was still
+  running the pre-SHIP c7b827e-dirty build (menu hung at boot); HEAD is
+  flashed now.
+- Tooling caveat (open): OS_CMD_SHOT can hard-wedge USB mid-dump
+  (device-side; game continues). Reopen the port to recover. Two hits in
+  ~40 dumps tonight.
+
+## 2026-08-22: 14-cart reliability suite -- 13 PASS, 1 refused by design
+
+- Popular-ROM sweep (Advance Wars, Aria of Sorrow, FFVI, Fire Emblem,
+  Golden Sun, Kirby NiDL, Minish Cap, Mario Kart SC, both Metroids,
+  FireRed US, Ruby US, Sonic Advance 2, SMA4), each: pack from the PC
+  .pak cache, verify-after-copy, boot, identity check on the cart header,
+  START/A play-through past the title, 40s stability window, 4 screenshots.
+  Automated end to end over serial (scratchpad testall.py).
+- RESULT: 13/13 fitting carts PASS with real gameplay pixels; Fire Emblem
+  (256 distinct pages -- more than the partition can ever hold) REFUSED in
+  6s from the cache header, on-screen message, console stays up.
+- THE USB WEDGE IS DEAD: esp_vfs_usb_serial_jtag_use_driver() after the
+  driver install. Root cause of every "serial died mid-dump" since the
+  console moved to USB-JTAG: the vfs console's raw nonblocking FIFO writes
+  raced the driver ISR feeding the same FIFO. 52/52 frame dumps survived
+  (previous run: device fell off the bus on dump ~5).
+- Stale-flash boot is impossible now: "no SD + nothing recorded" parks and
+  retries the card instead of flat-mapping leftovers (a Ruby image from an
+  old partition layout passed the header check and booted to a black
+  screen -- header validity is NOT provenance); romInvalidateFlashed wipes
+  every NVS key including size/map/zslot.
+- Mixer eligibility is a full 0x3A0 image compare (espgba_mixer_ref.h):
+  six of the fourteen carts ship a different m4a revision sharing the
+  first 0xB0 bytes -- entry-signature matching would have armed the
+  translation on foreign code. They now fall through to the interpreter.
+- Partition: factory 2M -> 1.5M, rom 223 -> 231 slots. Minish Cap (224)
+  fits and passes; the layout move also proved the self-heal (stale
+  Emerald record cleared on first boot, repack clean).
+- FireRed US gets idle+HLE by discovery (34 emu fps); Ruby US gets HLE
+  only (27 fps; its wait loop differs, correctly unmatched). Non-m4a-gen3
+  carts run 9-31 fps interpreter-only, all playable menus/dialogue proven.
+- Emerald US restored to flash at the end; menu up, 27 carts listed.
+
+## 2026-08-22: the in-hand freeze -- driver TX ringbuffer, single-writer fix
+
+- SYMPTOM (user, evening): console froze during real play, minutes in. All
+  soaks had been serial-attached; the freeze only fires with NO host reader.
+- ROOT CAUSE: the morning's use_driver console fix. With prints routed into
+  the usb_serial_jtag driver's TX ringbuffer and nobody draining USB, the
+  ring fills and IDF 4.4's driver TX never recovers -- proven by attaching
+  a fresh reader to a verifiably-running game and receiving ZERO bytes.
+- FIX: single-writer raw TX. use_driver reverted (console back on the vfs
+  raw nonblocking path -- solo-proven since day one); frame dumps now go
+  through the same raw FIFO inline from the frame-loop task
+  (usb_serial_jtag_ll_write_txfifo + flush, 100ms drop-on-stall). The
+  driver serves RX only; its TX ringbuffer is never fed. No async feeder,
+  no second writer, the original dump race stays structurally impossible.
+- VERIFIED, all on-hardware: 40/40 dumps twice (old wedge fired ~1 in 20);
+  15 min solo no-reader then reattach -> live BENCH at t=978s, no reboot;
+  8 min button-mash clean; 8 more min solo -> alive at t=987s.
+- Host tooling lessons: (1) presetting rts=True at pyserial open applies
+  DTR+RTS in one undefined-order transfer and can strap the chip into ROM
+  download mode -- it parks SILENT and stops ACKing, indistinguishable from
+  a wedge until esptool connects fine; open quiet, then pulse EN alone.
+  (2) `stty -F ... raw -hupcl` + O_NONBLOCK read attaches WITHOUT resetting
+  -- the only way to observe a solo-running device after the fact.
