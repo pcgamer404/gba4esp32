@@ -130,6 +130,11 @@ the `SPI_FLASH_MMAP_DATA` enum, and moved per-target `CONFIG_ESP32S3_SPIRAM_SUPP
 
 ## ROM size limits
 
+> **Superseded.** Sparse packing now aliases identical padding pages (all
+> 0xFF and all 0x00) into shared slots, so what must fit is a cart's
+> *distinct* pages — every 16 MB cart tested except Fire Emblem (US) fits.
+> The section below records the earlier flat-mapping era.
+
 | ROM | Size | Fits in 11 MB `rom` partition? |
 |---|---|---|
 | Pocket Monsters - Ruby (Japan) `AXVJ` | 8.00 MB | yes |

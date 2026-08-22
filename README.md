@@ -1,6 +1,8 @@
 # esp-gba — a GBA / GB / GBC handheld on an ESP32-S3
 
-![The finished handheld](docs/photos/finished.jpg)
+| | | |
+|---|---|---|
+| ![Menu](shots/06-menu.png) | ![Title](shots/04-title.png) | ![In-game](shots/09-birch.png) |
 
 A pocket emulator console built on the Freenove FNK0104 board (ESP32-S3, 2.8"
 ILI9341 320x240, ES8311 audio codec, SD slot, LiPo charging). It plays Game
@@ -14,9 +16,10 @@ Forked from [44vba](https://github.com/44670/44vba) (itself a
 
 ## Features
 
-- **GBA** via vba-next with a native (HLE) m4a audio mixer and per-game
-  idle-loop skip. Rendering is verified-correct (screenshot-audited);
-  15-35 fps depending on scene, with the speed work ongoing.
+- **GBA** via vba-next with a native (HLE) m4a audio mixer and idle-loop
+  skip, both discovered per cart by scanning (no game tables to maintain).
+  Rendering is verified-correct (screenshot-audited); 9-35 fps depending
+  on title and scene, with the speed work ongoing.
 - **GB / GBC** via gnuboy at a locked 60 fps, scaled 1.5x to 240x216.
 - **Sound** through the board's ES8311 codec + speaker, rate-matched to the
   emulator's real speed so audio never crackles or drifts.
@@ -44,12 +47,6 @@ What one unit is built from:
 | M2/M2.5 heat-set inserts + screws | case assembly |
 
 Custom PCBs and printable case models live under [hardware/](hardware/).
-
-## Build photos
-
-| | |
-|---|---|
-| ![Parts](docs/photos/build-parts.jpg) | ![Assembly](docs/photos/assembly.jpg) |
 
 ## Hardware
 
@@ -92,21 +89,16 @@ Nothing auto-starts: the console always boots to the picker and waits.
 
 ## Build & flash
 
-Requirements: [PlatformIO](https://platformio.org). The ESP-IDF build needs
-`setuptools<81` in PlatformIO's Python env
-(`~/.platformio/penv/bin/pip install "setuptools<81"`).
+**Step-by-step for Linux and Windows: [FLASHING.md](FLASHING.md).** Short
+version, once [PlatformIO](https://platformio.org) is installed:
 
 ```bash
-ESP_GBA_BOARD=FNK0104AB PORT=/dev/ttyACM0 bash tools/flash_qio.sh
+python tools/flash_qio.py
 ```
 
-Two things the script handles that a plain `pio run -t upload` gets wrong:
-
-- `ESP_GBA_BOARD=FNK0104AB` selects this board's pin map. Without it you get
-  the generic devkit build (wrong pins, and the link fails on the LCD code).
-- The bootloader must be flashed DIO while the app runs QIO; the script
-  patches the bootloader image accordingly (details in
-  [README-esp-gba.md](README-esp-gba.md)).
+Never use `pio run -t upload`: this board needs a DIO-patched bootloader
+with the QIO app, which the script handles (details in
+[README-esp-gba.md](README-esp-gba.md)).
 
 For a factory-fresh state (default settings), also erase NVS once:
 
@@ -116,9 +108,9 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 
 
 ## Performance notes
 
-The native audio mixer (default on) plus a 260 MHz overclock (default on,
-engages ~10 s into gameplay) run gen-3 Pokémon at 15-35 fps depending on
-scene, with rendering verified correct frame-by-frame. Faster renderer
+The native audio mixer (default on) plus an optional 260 MHz overclock
+(default off; settings screen) run gen-3 Pokémon at 24-39 fps depending on
+scene at stock clocks, with rendering verified correct frame-by-frame. Faster renderer
 paths exist in-tree but are unrouted until they pass the same
 screenshot audit that caught them rendering white. The overclock
 overdrives the shared PLL, which also pushes the flash clock ~8% out of
@@ -139,8 +131,30 @@ components/gnuboy/    gnuboy core (GB/GBC)
 port-esp32s3/         this port: display, audio, SD, menu, input, serial
 tools/                flash script, benchmark/screenshot/art tooling
 docs/                 wiring diagram, dev logs (docs/devlog/)
-port-sdl2/, port-wasm/, 44gba-watchos/   other 44vba ports, untouched
+port-sdl2/            44vba's desktop port, kept as the reference implementation
 ```
+
+## Compatibility
+
+Every game below was packed, byte-verified, booted, played past its title
+with real input, and screenshot-checked by the automated suite
+(`emu` fps in menu/attract scenes, stock 240 MHz):
+
+| Game | fps | Game | fps |
+|---|---|---|---|
+| Pokémon Emerald (U/J) | 24-39 | Mario Kart Super Circuit | 13 |
+| Pokémon FireRed (U/J) | 34 | Final Fantasy VI Advance | 12 |
+| Pokémon Ruby/Sapphire | 27 | Zelda: The Minish Cap | 11 |
+| Metroid Zero Mission | 31 | Kirby Nightmare in DL | 11 |
+| Golden Sun | 30 | Advance Wars | 10 |
+| Sonic Advance 2 | 16 | Castlevania: Aria of Sorrow | 9 |
+| Metroid Fusion | 16 | Super Mario Advance 4 | 9 |
+
+GB/GBC titles run at a locked 60. Any cart fits whose *distinct* 64 KB
+pages number ≤ 229 — identical padding pages are stored once, which is how
+16 MB carts fit in the 14.4 MB rom partition. The one known exception is
+Fire Emblem (US): 16 MB of pure unique content, refused with an on-screen
+message rather than truncated.
 
 ## Credits
 
