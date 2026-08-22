@@ -773,3 +773,24 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   deliverable: v2 codegen (registers in locals, flag liveness, compact
   non-inlined bodies in IRAM) now has a bit-exact test bed and a proven
   dispatch/arming layer. That is the next session.
+
+## 2026-08-22 evening: white-wash root cause; full-library regression at speed
+
+- USER REPORT: washed-out picture in-game. Cause: restoring the 278 hold
+  scaled the LCD SPI +15.8%% -- 55MHz nominal landed at 63.7, past this
+  panel's ~59.6 proven ceiling (the 55 figure was tuned for the 260 era).
+  LCD_SPI_HZ 55 -> 51 (59.1 under 278, back in the envelope; the async
+  blit pipeline absorbs the stock-clock cost).
+- Full 14-cart regression after the fix, and the renderer work compounds
+  across the whole library vs the first suite two days ago:
+  FireRed US 34 -> 59.7 (LOCKED FULL SPEED, stock), Ruby US 27 -> 58.9,
+  Golden Sun 30 -> 57.9, Zero Mission 31 -> 55.5, Sonic Advance 2 16 ->
+  33.7, Fusion 16 -> 31.8, Mario Kart 13 -> 30.8, Minish Cap 11 -> 22.1,
+  FFVI 12 -> 16.1, Aria 9 -> 15.9, Kirby 11 -> 12.6, Advance Wars 10 ->
+  12.3, SMA4 9 -> 11.5. Fire Emblem refused by design. 13/13 PASS.
+- Tooling note, unresolved: the boot-menu serial hang recurred (menu draws,
+  serial unconsumed; survives soft resets, vanishes after an esptool flash
+  cycle) and then refused to reproduce under instrumentation -- exactly like
+  day one. Console-only users never touch this path. The suite harness now
+  verifies each port open against boot output and re-pulses reset when the
+  strap lands in the ROM loader.

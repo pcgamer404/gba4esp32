@@ -119,11 +119,13 @@ int osTakeSerialPick(void);
 #define PIN_SPI0_SCLK 12
 #define PIN_SYS_RSTN (-1) /* RST tied to the board reset line */
 #define PIN_LCD_BL 45     /* backlight, HIGH = on */
-/* 55MHz nominal: the 260MHz overclock overdrives the SPI clock +8.3%, and at
- * a 60MHz base that lands past what this ILI9341 accepts -- the panel stops
- * taking writes ~10s into gameplay (white screen) while the game runs on.
- * 55 nominal = 59.6 under overclock, inside the proven envelope. */
-#define LCD_SPI_HZ (55000000)
+/* 51MHz nominal. The overclock scales this clock with the PLL, and the
+ * panel's proven ceiling is ~59.6MHz (the 260-era tuning: 55 nominal).
+ * The restored 278 hold scales +15.8%: 55 would land at 63.7 -- past the
+ * ceiling, and the glass washes out while the game runs on. 51 nominal =
+ * 59.1 under 278, back inside the envelope; stock-clock blits get ~8%
+ * slower, which the async pipeline absorbs. */
+#define LCD_SPI_HZ (51000000)
 
 /* SD pins: VERIFIED BY MOUNTING, not from the vendor sketch.
  *
