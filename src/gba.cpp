@@ -12717,17 +12717,14 @@ static void ESPGBA_HOT mode1RenderLineFast (void)
 template<int renderer_idx>
 inline renderfunc_t GetRenderFunc(int mode, int type) {
 	switch((mode << 4) | type) {
-		/* The fast painters (mode 0 and 1) are UNROUTED: the Emerald intro
-		 * renders white through them (screenshot bisect, framebuffer level).
-		 * Slow templates are upstream-proven. Re-route only after per-scene
-		 * SHOT verification. */
-		case 0x00: return mode0RenderLine<renderer_idx>;
+		/* Fast painters, back under audit: the bisects that unrouted them ran
+		 * on builds carrying USE_TWEAKS state decay AND the threaded ring's
+		 * live-COLEV/COLY race -- both fixed since. Their blend reads now go
+		 * through the per-slot snapshots like every other template. */
+		case 0x00: return mode0RenderLineFast;
 		case 0x01: return mode0RenderLineNoWindow<renderer_idx>;
 		case 0x02: return mode0RenderLineAll<renderer_idx>;
-		/* mode1RenderLineFast is DISABLED pending visual verification: the
-		 * Emerald title screen renders white through it (framebuffer-level,
-		 * proven by screenshot bisect). The slow template is correct. */
-		case 0x10: return mode1RenderLine<renderer_idx>;
+		case 0x10: return mode1RenderLineFast;
 		case 0x11: return mode1RenderLineNoWindow<renderer_idx>;
 		case 0x12: return mode1RenderLineAll<renderer_idx>;
 		case 0x20: return mode2RenderLine<renderer_idx>;

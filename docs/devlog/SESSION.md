@@ -737,3 +737,20 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   helper calls) sized to fit IRAM headroom, not flash XIP; and an SDL-side
   lockstep differ before it ever touches the console again.
 - Rollback verified on-glass: 49.2 emu in attract, OC game-only re-armed.
+
+## 2026-08-22 night: fast painters RE-ROUTED -- they were innocent
+
+- The screenshot bisects that unrouted both painters ran on builds carrying
+  USE_TWEAKS state decay AND the threaded ring's live-COLEV/COLY race --
+  both since fixed at root cause. Re-routed under the full audit: Emerald
+  US whole attract (chase ensemble pixel-perfect -- the exact scene the
+  ledger blamed on the mode-0 painter), mode-1 title with affine BG2,
+  New Game through Birch, FireRed attract + Charizard title. Zero stuck
+  whites; only the game's own lightning single-frames.
+- Mechanism confirmed in the BENCH split: w_tile 15%%->0, w_mix 15%%->0,
+  wait 9->5. emu flat in the attract because cpu sits at 82%% there (the
+  interpreter is that wall); the freed consumer headroom pays in heavy
+  in-game scenes where wait used to spike past 25%%.
+- State at handoff: Emerald US ~44-49 emu stock in attract, painters +
+  threaded ring + idle + HLE mixer all on, OC 278 game-only armed,
+  volume 70%%, overlay on.
