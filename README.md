@@ -1,5 +1,7 @@
 # esp-gba — a GBA / GB / GBC handheld on an ESP32-S3
 
+![The finished handheld](docs/photos/finished.jpg)
+
 | | | |
 |---|---|---|
 | ![Menu](shots/06-menu.png) | ![Title](shots/04-title.png) | ![In-game](shots/09-birch.png) |
@@ -48,6 +50,12 @@ What one unit is built from:
 
 Custom PCBs and printable case models live under [hardware/](hardware/).
 
+## Build photos
+
+| Parts | Assembly |
+|---|---|
+| ![Parts](docs/photos/build-parts.jpg) | ![Assembly](docs/photos/assembly.jpg) |
+
 ## Hardware
 
 | Part | Detail |
@@ -66,14 +74,36 @@ pull-ups, no external resistors needed.
 
 ## Controls
 
+The console has 8 physical buttons (D-pad, A, B, Start, Select) plus the
+board's BOOT button on the bottom edge. The GBA's shoulder buttons have no
+physical switches — they are **Select-combos**, which gen-3 Pokémon (and
+most GBA games) only use for optional shortcuts:
+
+**In game**
+
 | Input | Action |
 |---|---|
-| D-pad / A / B / Start / Select | GBA pad |
-| Select + Left / Right | L / R triggers |
-| Select + Up | toggle the debug/fps overlay |
-| Menu: D-pad | move selection |
-| Menu: A or Start | play |
-| Menu: Select | settings (volume/mute, debug overlay, overclock, native audio) |
+| D-pad / A / B / Start / Select | the GBA pad, 1:1 |
+| **Select + Left** (hold Select, tap Left) | **L shoulder** |
+| **Select + Right** (hold Select, tap Right) | **R shoulder** |
+| Select + Up | toggle the fps/debug overlay strip |
+
+A short Select press on its own still reaches the game (menus, party
+switching) — the combo only fires while a direction is pressed with it.
+
+**In the game picker**
+
+| Input | Action |
+|---|---|
+| D-pad | move the selection |
+| A or Start | play the highlighted game |
+| Select (or the gear icon by touch) | settings: volume, debug overlay, overclock, native audio |
+| Touch: left/right screen edge | previous/next library page |
+| BOOT button short press | next game (for units without the button matrix) |
+| BOOT button long press | play |
+
+**In settings**: Up/Down select a row, A toggles, Left/Right adjust the
+volume, B goes back. All settings persist across power cycles.
 
 Nothing auto-starts: the console always boots to the picker and waits.
 
@@ -108,9 +138,10 @@ pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 
 
 ## Performance notes
 
-The native audio mixer (default on) plus an optional 260 MHz overclock
-(default off; settings screen) run gen-3 Pokémon at 24-39 fps depending on
-scene at stock clocks, with rendering verified correct frame-by-frame. Faster renderer
+The native audio mixer (default on) plus an optional 278 MHz overclock
+(default off; settings screen; engages ~10 s into gameplay and never in
+the menu) run gen-3 Pokémon at 50-60 fps at stock clocks, with rendering
+verified correct frame-by-frame. Faster renderer
 paths exist in-tree but are unrouted until they pass the same
 screenshot audit that caught them rendering white. The overclock
 overdrives the shared PLL, which also pushes the flash clock ~8% out of
@@ -142,13 +173,13 @@ with real input, and screenshot-checked by the automated suite
 
 | Game | fps | Game | fps |
 |---|---|---|---|
-| Pokémon Emerald (U/J) | 24-39 | Mario Kart Super Circuit | 13 |
-| Pokémon FireRed (U/J) | 34 | Final Fantasy VI Advance | 12 |
-| Pokémon Ruby/Sapphire | 27 | Zelda: The Minish Cap | 11 |
-| Metroid Zero Mission | 31 | Kirby Nightmare in DL | 11 |
-| Golden Sun | 30 | Advance Wars | 10 |
-| Sonic Advance 2 | 16 | Castlevania: Aria of Sorrow | 9 |
-| Metroid Fusion | 16 | Super Mario Advance 4 | 9 |
+| Pokémon FireRed (US 59.7 / JP 59.1) | ~60 | Sonic Advance 2 | 34 |
+| Pokémon Ruby (US) | 58.9 | Metroid Fusion | 32 |
+| Golden Sun | 57.9 | Mario Kart Super Circuit | 31 |
+| Metroid Zero Mission | 55.5 | Zelda: The Minish Cap | 22 |
+| Pokémon Emerald (US/JP) | 47-55 | FFVI Advance | 16 |
+| Pokémon LeafGreen (JP) | 52.4 | Aria of Sorrow | 16 |
+| | | Kirby / Advance Wars / SMA4 | 11-13 |
 
 GB/GBC titles run at a locked 60. Any cart fits whose *distinct* 64 KB
 pages number ≤ 229 — identical padding pages are stored once, which is how

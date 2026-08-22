@@ -794,3 +794,14 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   day one. Console-only users never touch this path. The suite harness now
   verifies each port open against boot output and re-pulses reset when the
   strap lands in the ROM loader.
+
+## 2026-08-22 final: JP trio verified; README carries the real numbers
+
+- Pokemon Emerald JP 54.7, FireRed JP 59.1, LeafGreen JP 52.4 -- all PASS
+  with idle-skip + native mixer armed by discovery (LeafGreen never had a
+  table entry in the hardcoded era; the scans cover it for free).
+- README: real build photos (recovered from the session transcript --
+  parts / assembly / finished), controls section with the Select-combo
+  shoulder mapping spelled out, compatibility table at current speeds,
+  perf notes at 50-60 stock with the 278 opt-in. FLASHING.md verified
+  current. Firmware milestone closed.
