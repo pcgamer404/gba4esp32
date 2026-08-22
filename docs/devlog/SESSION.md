@@ -754,3 +754,22 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
 - State at handoff: Emerald US ~44-49 emu stock in attract, painters +
   threaded ring + idle + HLE mixer all on, OC 278 game-only armed,
   volume 70%%, overlay on.
+
+## 2026-08-22 later: AOT exonerated by the differ -- correct, neutral, parked
+
+- The desktop lockstep differ (SDL port, hash per frame, RTC pinned via
+  ESPGBA_FIXED_TIME -- Emerald reads the real clock at boot, so runs
+  minutes apart legitimately diverge) found THREE machinery bugs the
+  device could never localize: dispatch ahead of due events, clockTicks
+  leftovers double-charging ~5x (the loop zeroes it per iteration --
+  gba.cpp:7213 -- my "bug-compatible leftover" reading was wrong), and
+  Thumb prefetch clobbering ARM pipelines at block exits.
+- All fixed: 3600 frames BIT-IDENTICAL, interpreter vs all 548 blocks.
+- Device re-test with correct machinery: 47.1 emu vs 46.0/49.2 interpreted
+  (neutral; yesterday's "16%% slower" was the tick bug's artifact), 96k
+  dispatches, 8-min soak clean -- the crash died with the tick fix.
+- Verdict: handler-call translation is a WASH on this icache-starved part.
+  Ships dormant again (correctness without a win). The differ is the real
+  deliverable: v2 codegen (registers in locals, flag liveness, compact
+  non-inlined bodies in IRAM) now has a bit-exact test bed and a proven
+  dispatch/arming layer. That is the next session.

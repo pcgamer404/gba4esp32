@@ -17406,23 +17406,16 @@ extern "C" int espgba_aot_arm(const char *code)
       memset(table_mem, 0, (span >> 1) * sizeof(void *));
       int armed = 0;
       int limit = games[g].n;
-#ifdef AOT_HOST_NO_HASH_GATE
-      {  /* bisection aid: arm only the first N blocks */
-         const char *lim = getenv("ESPGBA_AOT_LIMIT");
-         if (lim)
-            limit = atoi(lim);
-      }
       int skip = -1;
-      {  /* bisection aid: skip one block by index */
-         const char *sk = getenv("ESPGBA_AOT_SKIP");
-         if (sk)
-            skip = atoi(sk);
-      }
       int only = -1;
-      {  /* bisection aid: arm exactly one block */
+#ifdef AOT_HOST_NO_HASH_GATE
+      {  /* host differ bisection aids */
+         const char *lim = getenv("ESPGBA_AOT_LIMIT");
+         const char *sk = getenv("ESPGBA_AOT_SKIP");
          const char *on = getenv("ESPGBA_AOT_ONLY");
-         if (on)
-            only = atoi(on);
+         if (lim) limit = atoi(lim);
+         if (sk)  skip = atoi(sk);
+         if (on)  only = atoi(on);
       }
 #endif
       for (int i = 0; i < games[g].n && i < limit; i++) {
