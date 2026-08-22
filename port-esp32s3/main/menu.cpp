@@ -644,9 +644,25 @@ int menuChooseRom(const sdRomEntry *roms, int n, const char *flashed) {
 #define NVS_KEY_SIZE "romsize"
 #define NVS_KEY_MAP "rommap"
 #define NVS_KEY_PAGES "rompages"
+#define NVS_KEY_ZSLOT "romzslot"
 
 #define ROM_PAGE 65536
 #define ROM_MAX_PAGES 512
+
+/* Map entry for an all-0x00 page: aliased to ONE shared zero-filled slot,
+ * exactly like all-0xFF pages alias the erased slot 0. Zeros are real cart
+ * content (Emerald US carries 29 such pages -- 1.81MB), but they are all the
+ * same content, and without this the cart needs 228 distinct slots against
+ * the partition's 223: the last six real pages silently fell off the end,
+ * which is precisely where its title screen lives. White title, healthy
+ * game -- three evenings of that. */
+#define MAP_ZERO 0xFFFF
+
+/* .map cache header. Version 1 had no header and no zero-aliasing; a v1
+ * cache built before the capacity wall was understood can describe a
+ * truncated pack as if it were complete, so headerless caches are ignored
+ * and rebuilt rather than trusted. */
+static const char kMapMagic[8] = {'G', 'B', 'A', 'M', 'A', 'P', '2', 0};
 
 /* m4a/mp2k sound-engine downrate patch.
  *
@@ -782,9 +798,14 @@ void romInvalidateFlashed(void) {
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) != ESP_OK) {
     return;
   }
+  /* ALL of it: a surviving size or map key lets a later boot flat-map or
+   * sparse-map stale flash as if it were a game. */
   nvs_erase_key(h, NVS_KEY);
   nvs_erase_key(h, NVS_KEY_CODE);
+  nvs_erase_key(h, NVS_KEY_SIZE);
+  nvs_erase_key(h, NVS_KEY_MAP);
   nvs_erase_key(h, NVS_KEY_PAGES);
+  nvs_erase_key(h, NVS_KEY_ZSLOT);
   nvs_commit(h);
   nvs_close(h);
 }
@@ -879,9 +900,15 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
   FILE *mf = pf ? fopen(mapPath, "rb") : NULL;
   bool cached = false;
   if (pf && mf) {
-    if (fread(map, sizeof(uint16_t), nPages, mf) == nPages) {
+    char hdr[sizeof(kMapMagic)] = {0};
+    if (fread(hdr, 1, sizeof(hdr), mf) == sizeof(hdr) &&
+        memcmp(hdr, kMapMagic, sizeof(kMapMagic)) == 0 &&
+        fread(map, sizeof(uint16_t), nPages, mf) == nPages) {
       cached = true;
       ESP_LOGI(TAG, "using packed cache %s", pak);
+    } else {
+      printf("MENU: pack cache is old-format or short -- rescanning %s\n",
+             name);
     }
   }
   if (mf) fclose(mf);
@@ -902,6 +929,7 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
       nvs_erase_key(h, NVS_KEY_CODE);
       nvs_erase_key(h, NVS_KEY_MAP);
       nvs_erase_key(h, NVS_KEY_PAGES);
+      nvs_erase_key(h, NVS_KEY_ZSLOT);
       nvs_commit(h);
       nvs_close(h);
     }
@@ -909,6 +937,7 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
 
   uint32_t nextSlot = 1;
   uint32_t maxSlots = part->size / ROM_PAGE;
+  uint32_t zeroSlot = 0; /* 0 = no all-zero pages in this cart */
   int lastPct = -1;
   bool ok = true;
   esp_err_t werr = ESP_OK;
@@ -934,8 +963,22 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
   if (cached) {
     /* Straight copy of the pre-packed pages; the map is already known. */
     uint32_t slots = 0;
+    bool anyZero = false;
     for (uint32_t i = 0; i < nPages; i++) {
-      if (map[i] > slots) slots = map[i];
+      if (map[i] == MAP_ZERO) {
+        anyZero = true;
+      } else if (map[i] > slots) {
+        slots = map[i];
+      }
+    }
+    if (slots + (anyZero ? 1u : 0u) >= maxSlots) {
+      printf("MENU: cached pack needs %u slots, partition has %u -- too big\n",
+             (unsigned)(slots + (anyZero ? 1 : 0) + 1), (unsigned)maxSlots);
+      fclose(pf);
+      free(buf);
+      fclose(f);
+      menuMessage("rom too big for flash", "even sparse-packed");
+      return false;
     }
     for (uint32_t sIdx = 1; sIdx <= slots; sIdx++) {
       size_t got = fread(buf, 1, ROM_PAGE, pf);
@@ -972,6 +1015,17 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
       unlink(mapPath);
     }
     nextSlot = slots + 1;
+    if (ok && anyZero) {
+      zeroSlot = nextSlot++;
+      memset(buf, 0, ROM_PAGE);
+      if (!SLOT_PREP(zeroSlot) ||
+          (werr = esp_partition_write(part, zeroSlot * ROM_PAGE, buf,
+                                      ROM_PAGE)) != ESP_OK) {
+        printf("MENU: zero-slot write failed at %u: %s\n", (unsigned)zeroSlot,
+               esp_err_to_name(werr));
+        ok = false;
+      }
+    }
     goto finish;
   }
 
@@ -979,6 +1033,9 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
   mkdir(SD_PACK_DIR, 0777);
   pf = fopen(pak, "wb");
   mf = fopen(mapPath, "wb");
+  if (mf) {
+    fwrite(kMapMagic, 1, sizeof(kMapMagic), mf);
+  }
 
   for (uint32_t i = 0; i < nPages; i++) {
     size_t got = fread(buf, 1, ROM_PAGE, f);
@@ -991,16 +1048,18 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
       memset(buf + got, 0xFF, ROM_PAGE - got);
     }
 
-    bool blank = true;
+    bool blank = true, zero = true;
     for (uint32_t k = 0; k < ROM_PAGE; k += 4) {
-      if (*(uint32_t *)(buf + k) != 0xFFFFFFFFu) {
-        blank = false;
-        break;
-      }
+      uint32_t w = *(uint32_t *)(buf + k);
+      if (w != 0xFFFFFFFFu) blank = false;
+      if (w != 0) zero = false;
+      if (!blank && !zero) break;
     }
 
     if (blank) {
-      map[i] = 0;  /* alias the shared blank page */
+      map[i] = 0;  /* alias the shared blank (erased) page */
+    } else if (zero) {
+      map[i] = MAP_ZERO; /* alias the shared zero page, allocated at the end */
     } else {
       m4aHits += m4aPatchPage(buf);
       if (nextSlot >= maxSlots) {
@@ -1029,6 +1088,34 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
       menuProgress("copying to flash...", pct);
     }
   }
+  /* One shared zero-filled slot backs every all-0x00 page. */
+  if (ok) {
+    bool anyZero = false;
+    for (uint32_t i = 0; i < nPages; i++) {
+      if (map[i] == MAP_ZERO) {
+        anyZero = true;
+        break;
+      }
+    }
+    if (anyZero) {
+      if (nextSlot >= maxSlots) {
+        printf("MENU: out of flash for the zero slot: %u slots used\n",
+               (unsigned)nextSlot);
+        ok = false;
+      } else {
+        zeroSlot = nextSlot++;
+        memset(buf, 0, ROM_PAGE);
+        if (!SLOT_PREP(zeroSlot) ||
+            (werr = esp_partition_write(part, zeroSlot * ROM_PAGE, buf,
+                                        ROM_PAGE)) != ESP_OK) {
+          printf("MENU: zero-slot write failed at %u: %s\n",
+                 (unsigned)zeroSlot, esp_err_to_name(werr));
+          ok = false;
+        }
+      }
+    }
+  }
+
   if (mf) {
     fwrite(map, sizeof(uint16_t), nPages, mf);
     fclose(mf);
@@ -1036,14 +1123,67 @@ bool romCopyFromSd(const char *name, uint32_t size, const char *code) {
   if (pf) {
     fclose(pf);
   }
+  if (!ok) {
+    /* Never leave a cache describing a pack that failed. */
+    unlink(pak);
+    unlink(mapPath);
+  }
 
 finish:
+  /* Trust nothing that was not read back. The Emerald-US truncation lived in
+   * flash for days because "copy finished" was taken as "copy correct": the
+   * NVS map said pages 222-227 were blank and every layer above believed it.
+   * Sample pages across the cart -- always including the LAST real page,
+   * where truncation bites -- reread them from SD and from flash through the
+   * map, and refuse to record success on any mismatch. */
+  if (ok) {
+    uint8_t *vbuf = (uint8_t *)heap_caps_malloc(ROM_PAGE, MALLOC_CAP_SPIRAM);
+    if (vbuf) {
+      uint32_t lastReal = 0;
+      for (uint32_t i = 0; i < nPages; i++) {
+        if (map[i] != 0) lastReal = i;
+      }
+      menuProgress("verifying...", 0);
+      for (int k = 0; k <= 8 && ok; k++) {
+        uint32_t i = (k == 8) ? lastReal
+                              : (uint32_t)((uint64_t)(nPages - 1) * k / 7);
+        if (fseek(f, (long)i * ROM_PAGE, SEEK_SET) != 0 ||
+            fread(buf, 1, ROM_PAGE, f) != ROM_PAGE) {
+          printf("MENU: verify: SD reread of page %u failed\n", (unsigned)i);
+          ok = false;
+          break;
+        }
+        m4aPatchPage(buf); /* flash holds the patched bytes */
+        uint32_t slot = (map[i] == MAP_ZERO) ? zeroSlot : map[i];
+        if ((werr = esp_partition_read(part, slot * ROM_PAGE, vbuf,
+                                       ROM_PAGE)) != ESP_OK) {
+          printf("MENU: verify: flash read of slot %u failed: %s\n",
+                 (unsigned)slot, esp_err_to_name(werr));
+          ok = false;
+          break;
+        }
+        if (memcmp(buf, vbuf, ROM_PAGE) != 0) {
+          printf("MENU: VERIFY MISMATCH page %u (slot %u) -- pack is bad\n",
+                 (unsigned)i, (unsigned)slot);
+          ok = false;
+        }
+        menuProgress("verifying...", (k + 1) * 100 / 9);
+      }
+      free(vbuf);
+      if (!ok) {
+        unlink(pak);
+        unlink(mapPath);
+      }
+    } else {
+      printf("MENU: verify skipped: no PSRAM for the compare buffer\n");
+    }
+  }
   free(buf);
   fclose(f);
 
   if (!ok) {
-    /* The specific reason (short pak read, write error, out of slots) has
-     * already gone to serial at the point of failure. */
+    /* The specific reason (short pak read, write error, out of slots,
+     * verify mismatch) has already gone to serial at the point of failure. */
     menuMessage("rom copy failed", "details on serial console");
     return false;
   }
@@ -1059,6 +1199,7 @@ finish:
   if (nvs_open(NVS_NS, NVS_READWRITE, &h) == ESP_OK) {
     nvs_set_blob(h, NVS_KEY_MAP, map, nPages * sizeof(uint16_t));
     nvs_set_u32(h, NVS_KEY_PAGES, nPages);
+    nvs_set_u32(h, NVS_KEY_ZSLOT, zeroSlot);
     nvs_set_u8(h, NVS_KEY_M4A, ESPGBA_M4A_FREQ_IDX);
     nvs_commit(h);
     nvs_close(h);
@@ -1083,6 +1224,8 @@ uint32_t romGetPageMap(int *pagesOut, uint32_t maxPages) {
   static uint16_t map[ROM_MAX_PAGES];
   size_t sz = sizeof(map);
   esp_err_t err = nvs_get_blob(h, NVS_KEY_MAP, map, &sz);
+  uint32_t zeroSlot = 0;
+  nvs_get_u32(h, NVS_KEY_ZSLOT, &zeroSlot);
   nvs_close(h);
   if (err != ESP_OK || nPages == 0 || nPages > maxPages) {
     return 0;
@@ -1090,7 +1233,17 @@ uint32_t romGetPageMap(int *pagesOut, uint32_t maxPages) {
 
   uint32_t base = part->address / ROM_PAGE;  /* absolute flash page index */
   for (uint32_t i = 0; i < nPages; i++) {
-    pagesOut[i] = (int)(base + map[i]);
+    if (map[i] == MAP_ZERO) {
+      if (zeroSlot == 0) {
+        /* Map references the shared zero page but none was recorded --
+         * corrupt record; treat as nothing flashed rather than serve 0xFF
+         * where zeros belong. */
+        return 0;
+      }
+      pagesOut[i] = (int)(base + zeroSlot);
+    } else {
+      pagesOut[i] = (int)(base + map[i]);
+    }
   }
   return nPages;
 }

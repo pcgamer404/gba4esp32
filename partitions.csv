@@ -1,14 +1,17 @@
 # Name,   Type, SubType, Offset,   Size, Flags
 #
-# 16MB flash. The app is only ~655KB, so the old 4M app partition was wasting
-# 2M that the rom partition can use: 11.94MB -> 13.94MB, which covers every GBA
-# cart except the 16MB ones.
+# 16MB flash. The app is ~850KB, so 1.5M is comfortable and every spare page
+# goes to the rom partition: 0xE70000 = 14.44MB = 231 sparse-pack slots.
 #
-# 16MB carts cannot be made to fit, and this is arithmetic rather than tuning:
-# even a 1MB app leaves at most 14.94MB, while Emerald needs 15.25MB and FireRed
-# 15.87MB *after* trimming their padding. Those two require an SD-paging reader,
-# not a bigger partition.
+# Sparse packing (menu.cpp) aliases all-0xFF pages to slot 0 and all-0x00
+# pages to one shared zero slot, so what must fit is a cart's DISTINCT pages
+# plus the two shared ones, not its nominal size. 231 slots covers every
+# popular cart measured so far (Emerald US 201, Sonic Advance 2 208, Minish
+# Cap 224 -- which the old 223-slot layout missed by one). The true ceiling
+# is a cart with more than 229 distinct pages: Fire Emblem US is 256 distinct
+# pages of pure content and can never fit without an SD-paging reader; the
+# menu refuses it loudly instead of truncating.
 nvs,      data, nvs,     0x9000,   0x6000,
 phy_init, data, phy,     0xf000,   0x1000,
-factory,  app,  factory, 0x10000,  2M,
-rom,      0x40, 0,       0x210000, 0xDF0000,
+factory,  app,  factory, 0x10000,  0x180000,
+rom,      0x40, 0,       0x190000, 0xE70000,
