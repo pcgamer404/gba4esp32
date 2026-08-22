@@ -715,3 +715,25 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   (settings loop polls now); overlay/volume/OC all NVS-persistent.
 - Remaining to 60: m4a sequencer AOT (0x8006600 cluster, ~19%), sprite
   pass, painters (still unrouted, still gated on per-scene audits).
+
+## 2026-08-22 late: sequencer AOT v1 -- built, measured, PARKED
+
+- Full pipeline exists and works: tools/aot/xlate.py translates a Thumb
+  window into C blocks that call the interpreter's own handlers with
+  constant opcodes (semantics + ticks identical by construction), dense
+  PSRAM table dispatch in the loop, per-cart arming gated on a hash of
+  the PATCHED window bytes (the m4a downrate patch lives in-window --
+  hashing the pristine file cost one mismatch round).
+- US-Emerald hot profile (idle+HLE already dead): flat. Biggest contiguous
+  region is the m4a engine at 0x082df000-0x082e1000 (~30% of top blocks).
+  55 hot blocks generated (all 1133 overflowed the app partition by 117KB).
+- VERDICT: 38.7 vs 46.0 emu -- 16% SLOWER armed, and one unreproduced
+  in-game crash episode on the first run. Cause fits the known wall: ~65KB
+  of inlined block code in flash XIP thrashing the 32KB icache SHARED with
+  the core-1 renderer (same lesson as the per-slot template instances).
+  Dispatch savings < cache misses at this code size.
+- Parked: gen files empty, dispatch dormant, zero runtime cost. If revived:
+  compact non-inlined codegen (registers in locals, flag liveness, shared
+  helper calls) sized to fit IRAM headroom, not flash XIP; and an SDL-side
+  lockstep differ before it ever touches the console again.
+- Rollback verified on-glass: 49.2 emu in attract, OC game-only re-armed.

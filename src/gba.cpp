@@ -903,6 +903,19 @@ extern "C" uint32_t espgba_hle_hits;
 uint32_t espgba_hle_hits;
 extern "C" uint32_t espgba_hle_bails;
 uint32_t espgba_hle_bails;
+
+/* ---- AOT dispatch (tools/aot/xlate.py) ------------------------------- */
+/* Translated Thumb blocks for one contiguous hot window per game. Each
+ * block is the interpreter's own handlers called with constant opcodes
+ * (semantics and tick charges identical by construction); dispatch is a
+ * two-op range check at the loop hook, a dense fn-pointer table inside
+ * the window, and NULL entries fall through to the interpreter. */
+typedef struct { u32 pc; void (*fn)(void); } espgba_aot_entry;
+static void (**espgba_aot_table)(void);
+static u32 espgba_aot_base = 0xFFFFFFFFu; /* miss everything until armed */
+static u32 espgba_aot_span;
+extern "C" uint32_t espgba_aot_hits;
+uint32_t espgba_aot_hits;
 /* Diagnostic: counts how often the PC passes through espgba_probe_pc in
  * either dispatch loop. No side effects; for locating hook points. */
 extern "C" uint32_t espgba_probe_pc;
@@ -7203,6 +7216,14 @@ static int thumbExecute (void)
           * original code, bit for bit. */
          if (espgba_m4a_native())
             cpuTotalTicks += 256;
+      }
+      if ((u32)(bus.armNextPC - espgba_aot_base) < espgba_aot_span) {
+         void (*aot_fn)(void) =
+             espgba_aot_table[(bus.armNextPC - espgba_aot_base) >> 1];
+         if (aot_fn) {
+            espgba_aot_hits++;
+            aot_fn(); /* runs handlers until control leaves the block */
+         }
       }
 #endif
 
@@ -17180,3 +17201,97 @@ void cheatsWriteByte(u32, u8)
 #endif
 #endif
 }
+
+/* ====================================================================
+ * AOT-translated blocks (tools/aot/xlate.py). Included last: the block
+ * bodies call the static thumb handlers above with constant opcodes.
+ * ==================================================================== */
+#ifdef ESP_PLATFORM
+#include "esp_heap_caps.h"
+
+/* One emitted instruction: exactly one interpreter loop iteration minus
+ * dispatch, decode and pipeline shuffle. clockTicks is deliberately NOT
+ * pre-cleared -- handlers that leave it untouched inherit the previous
+ * value in the real loop too (bug-compatible by design). The window is
+ * screened at generation time to contain no swi/halt-class ops, so the
+ * loop's ct<0 exit cannot occur inside a block. */
+#define AOT_STEP(addr, handler, opc, nextaddr)                          \
+   do {                                                                 \
+      bus.busPrefetch = false;                                          \
+      bus.armNextPC = bus.reg[15].I;                                    \
+      bus.reg[15].I += 2;                                               \
+      handler(opc);                                                     \
+      espgba_insns++;                                                   \
+      if (clockTicks == 0)                                              \
+         clockTicks = codeTicksAccessSeq16(addr) + 1;                   \
+      cpuTotalTicks += clockTicks;                                      \
+      if (bus.armNextPC != (nextaddr) || cpuTotalTicks >= cpuNextEvent) \
+         goto aot_out;                                                  \
+   } while (0)
+
+/* Refill the pipeline for whatever PC we are leaving at; the interpreter
+ * resumes there on the very next loop iteration. */
+#define AOT_EXIT()     \
+   aot_out:            \
+   THUMB_PREFETCH;     \
+   return
+
+#include "aot_gen_bpej.inc"
+#include "aot_gen_bpee.inc"
+
+/* Arm the table for the running cart iff its window bytes hash-match the
+ * image the blocks were generated from. Anything else stays interpreted. */
+extern "C" int espgba_aot_arm(const char *code)
+{
+   struct game {
+      const char *code;
+      const espgba_aot_entry *entries;
+      int n;
+      u32 base, end;
+      u64 hash;
+   };
+   static const struct game games[] = {
+       {"BPEJ", espgba_aot_bpej,
+        (int)(sizeof(espgba_aot_bpej) / sizeof(espgba_aot_bpej[0])),
+        ESPGBA_AOT_BPEJ_BASE, ESPGBA_AOT_BPEJ_END, ESPGBA_AOT_BPEJ_HASH},
+       {"BPEE", espgba_aot_bpee,
+        (int)(sizeof(espgba_aot_bpee) / sizeof(espgba_aot_bpee[0])),
+        ESPGBA_AOT_BPEE_BASE, ESPGBA_AOT_BPEE_END, ESPGBA_AOT_BPEE_HASH},
+   };
+   for (unsigned g = 0; g < sizeof(games) / sizeof(games[0]); g++) {
+      if (memcmp(code, games[g].code, 4) != 0)
+         continue;
+      const u8 *win = rom + (games[g].base & 0x1FFFFFF);
+      u64 h = 0xcbf29ce484222325ull;
+      for (u32 i = 0; i < games[g].end - games[g].base; i++)
+         h = (h ^ win[i]) * 0x100000001b3ull;
+      if (h != games[g].hash)
+         return -1; /* different image (romhack/other rev): stay interpreted */
+      u32 span = games[g].end - games[g].base;
+      static void (**table_mem)(void);
+      static u32 table_cap;
+      if (table_mem == NULL || (span >> 1) > table_cap) {
+         free(table_mem);
+         table_mem = (void (**)(void))heap_caps_malloc(
+             (span >> 1) * sizeof(void *), MALLOC_CAP_SPIRAM);
+         if (table_mem == NULL)
+            return -2;
+         table_cap = span >> 1;
+      }
+      memset(table_mem, 0, (span >> 1) * sizeof(void *));
+      int armed = 0;
+      for (int i = 0; i < games[g].n; i++) {
+         if (games[g].entries[i].fn == 0)
+            continue; /* sentinel */
+         table_mem[(games[g].entries[i].pc - games[g].base) >> 1] =
+             games[g].entries[i].fn;
+         armed++;
+      }
+      espgba_aot_table = table_mem;
+      espgba_aot_span = span;
+      espgba_aot_base = games[g].base; /* last: arms the dispatch */
+      return armed;
+   }
+   return 0;
+}
+#endif /* ESP_PLATFORM */

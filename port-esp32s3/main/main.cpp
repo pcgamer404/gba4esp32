@@ -659,6 +659,17 @@ extern "C" void app_main() {
     for (int i = 0; i < 4; i++) {
       if (key[i] < 0x21 || key[i] > 0x7E) key[i] = '_';
     }
+    /* AOT-translated hot blocks (tools/aot/xlate.py): armed only when the
+     * cart's window bytes hash-match the generation source. */
+    {
+      extern int espgba_aot_arm(const char *code);
+      int aotN = espgba_aot_arm(key);
+      if (aotN > 0) {
+        printf("AOT: %d translated blocks armed for %s\n", aotN, key);
+      } else if (aotN == -1) {
+        printf("AOT: window hash mismatch for %s -- staying interpreted\n", key);
+      }
+    }
     uint32_t pc = 0;
     const char *src = "scan";
     {
@@ -1036,9 +1047,9 @@ extern "C" void app_main() {
                  (unsigned)(armPct < 0 ? 0 : armPct > 99 ? 99 : armPct));
       }
       {
-        extern uint32_t espgba_hle_hits, espgba_hle_bails;
-        printf("HLESTAT hits=%u bails=%u\n", (unsigned)espgba_hle_hits,
-               (unsigned)espgba_hle_bails);
+        extern uint32_t espgba_hle_hits, espgba_hle_bails, espgba_aot_hits;
+        printf("HLESTAT hits=%u bails=%u aot=%u\n", (unsigned)espgba_hle_hits,
+               (unsigned)espgba_hle_bails, (unsigned)espgba_aot_hits);
       }
       /* One battery/USB read a second costs nothing. */
       batteryMv = osBatteryMv();
