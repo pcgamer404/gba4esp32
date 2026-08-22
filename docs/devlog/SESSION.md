@@ -578,3 +578,24 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   shipped on fps numbers alone was broken in ways benches cannot see.
   SHOT + PANELDUMP now make seeing cheap; nothing renders "fast" again
   without rendering RIGHT first.
+
+## 2026-08-21 end: THE white screen -- USE_TWEAKS corrupted game state
+
+- The surviving glass-white ("intro plays, dragon part ends, white, loop")
+  plus the loop-2 GameFreak logo missing sprite letters ("GAM REAK") =
+  progressive state corruption BELOW the renderer, on both renderers.
+- Bisect: USE_TWEAKS=0 -> the entire Emerald US intro plays flawlessly,
+  screenshot-verified at every previous failure point (Rayquaza valley,
+  bike scene, full chase ensemble at t=174s) and runs DEEPER than any
+  tweaked build ever did. The inherited vba-next timing shortcuts
+  (-DUSE_TWEAKS=1, in the build since day one) skew IRQ/timing enough for
+  gen-3 state machines to decay over minutes.
+- SHIP: USE_TWEAKS=0, overclock default OFF (PSRAM overdrive remains a
+  suspect for long-session decay; opt-in until soak-proven). Gamma
+  reverted earlier the same night (blind panel change; GRAM readback
+  cannot see gamma -- eyes only).
+- The full white-screen ledger, five distinct causes over three days:
+  MMU window (fixed), OC flash-write corruption (guarded), SD data damage
+  (repaired+detected), fast painters + threaded ring (unrouted), and
+  USE_TWEAKS state decay (off). Every one found by making the invisible
+  visible: BADJUMP dumps, SHOT, PANELDUMP, PEEK sweeps.

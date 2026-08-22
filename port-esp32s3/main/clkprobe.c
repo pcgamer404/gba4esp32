@@ -266,7 +266,9 @@ void clkFlashRestore(void) {
  * at stock 240, which is the order proven to work. */
 bool clkAutoGet(void) {
   nvs_handle_t h;
-  uint8_t v = 1; /* overclock ON by default; flash writes drop to stock */
+  uint8_t v = 0; /* overclock OFF by default: suspected of corrupting
+                  * PSRAM-resident VRAM over minutes (progressive sprite/
+                  * palette decay). Opt-in via settings until cleared. */
   if (nvs_open("clk", NVS_READONLY, &h) == ESP_OK) {
     nvs_get_u8(h, "auto278", &v);
     nvs_close(h);

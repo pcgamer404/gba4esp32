@@ -20,5 +20,5 @@ target_compile_options(${COMPONENT_LIB} PRIVATE
     # taken BEQ, fixed gamepak waitstates, fast DMA fill/copy. Known safe on
     # Pokemon gen 3 (the watch port runs them).
     -DTILED_RENDERING
-    -DUSE_TWEAKS=1
+    -DUSE_TWEAKS=0
     -DTHREADED_RENDERER=0)

@@ -11,7 +11,7 @@ idf_component_register(SRCS "main.cpp"
 "thread_esp.c"
 INCLUDE_DIRS "." "../../src" "../../libretro" "../../libretro-common/include"
 )
-target_compile_options(${COMPONENT_LIB} PRIVATE  -O2 -DFRONTEND_SUPPORTS_RGB565 -DPIX_BE_565 -DHAVE_STDINT_H -DINLINE=inline -DLSB_FIRST -DUSE_FRAME_SKIP -DUSE_TWEAKS=1 -DTILED_RENDERING -DTHREADED_RENDERER=0 )
+target_compile_options(${COMPONENT_LIB} PRIVATE  -O2 -DFRONTEND_SUPPORTS_RGB565 -DPIX_BE_565 -DHAVE_STDINT_H -DINLINE=inline -DLSB_FIRST -DUSE_FRAME_SKIP -DUSE_TWEAKS=0 -DTILED_RENDERING -DTHREADED_RENDERER=0 )
 
 
 # Headless build: ESP_GBA_HEADLESS=1 pio run
