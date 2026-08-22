@@ -170,6 +170,12 @@ static void hardware_reset() {
 		bool draw_sprites;
 		uint16_t mosaic;
 		uint16_t bldmod;
+		/* Blend inputs MUST ride the slot. BLDMOD always did; COLEV/COLY were
+		 * read LIVE by the templates, so core 1 blended queued lines with
+		 * whatever the game had set by render time -- the direct mechanism
+		 * behind "fade-to-white sticks through the threaded ring". */
+		uint16_t colev;
+		uint16_t coly;
 		uint16_t layers;
 
 		int bg2c;
@@ -248,6 +254,8 @@ static void hardware_reset() {
 	#define RENDERER_IO_REGISTERS renderer_ctx.io_registers
 	#define RENDERER_MOSAIC renderer_ctx.mosaic
 	#define RENDERER_BLDMOD renderer_ctx.bldmod
+	#define RENDERER_COLEV renderer_ctx.colev
+	#define RENDERER_COLY renderer_ctx.coly
 	#define RENDERER_GRAPHICS_LAYERS renderer_ctx.layers
 	#define RENDERER_LINE_OBJ_PIX_LEFT espgba_worker_objpixleft
 	#define RENDERER_GFX_IN_WIN renderer_ctx.gfxInWin
@@ -305,6 +313,8 @@ static void hardware_reset() {
 	#define RENDERER_OAM oam
 	#define RENDERER_MOSAIC MOSAIC
 	#define RENDERER_BLDMOD BLDMOD
+	#define RENDERER_COLEV COLEV
+	#define RENDERER_COLY COLY
 	#define RENDERER_GRAPHICS_LAYERS graphics.layerEnable
 	#define RENDERER_LINE_OBJ_PIX_LEFT lineOBJpixleft
 	#define RENDERER_GFX_IN_WIN gfxInWin
@@ -412,15 +422,15 @@ static u32 AlphaClampLUT[64] =
 #define brightness_switch()                                                                \
 	switch(RENDERER_R_BLDCNT_Color_Special_Effect) { \
 		case SpecialEffect_Brightness_Increase:                                            \
-			color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]); break;               \
+			color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]); break;               \
 		case SpecialEffect_Brightness_Decrease:                                            \
-			color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]); break;               \
+			color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]); break;               \
 	}
 
 #define alpha_blend_brightness_switch()                                                    \
 	if(RENDERER_R_BLDCNT_IsTarget2(top2)) { \
 		if(color < 0x80000000) {	\
-			GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]); \
+			GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]); \
 		} else if (RENDERER_R_BLDCNT_IsTarget1(top)) { \
 			brightness_switch();                                                           \
 		} \
@@ -10149,18 +10159,18 @@ static void ESPGBA_HOT mode0RenderLineNoWindow (void)
 
                   if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
                   {
-                     GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+                     GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
                   }
 
                }
                break;
             case SpecialEffect_Brightness_Increase:
                if(RENDERER_R_BLDCNT_IsTarget1(top))
-                  color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+                  color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
                break;
             case SpecialEffect_Brightness_Decrease:
                if(RENDERER_R_BLDCNT_IsTarget1(top))
-                  color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+                  color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
                break;
          }
       }
@@ -10361,15 +10371,15 @@ static void ESPGBA_HOT mode0RenderLineAll (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
-					color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+					color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
-					color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+					color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		}
@@ -10582,17 +10592,17 @@ static void mode1RenderLineNoWindow (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		} else {
@@ -10777,17 +10787,17 @@ static void mode1RenderLineAll (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		}
@@ -10977,17 +10987,17 @@ static void mode2RenderLineNoWindow (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		} else {
@@ -11140,17 +11150,17 @@ static void mode2RenderLineAll (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		}
@@ -11281,18 +11291,18 @@ INIT_RENDERER_CONTEXT(renderer_idx);
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		} else {
@@ -11411,17 +11421,17 @@ static void mode3RenderLineAll (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		}
@@ -11552,17 +11562,17 @@ static void mode4RenderLineNoWindow (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		} else {
@@ -11682,17 +11692,17 @@ static void mode4RenderLineAll (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		}
@@ -11822,18 +11832,18 @@ static void mode5RenderLineNoWindow (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		} else {
@@ -11952,17 +11962,17 @@ static void mode5RenderLineAll (void)
 
 						if(RENDERER_R_BLDCNT_IsTarget2(top2) && color < 0x80000000)
 						{
-							GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F], coeff[(COLEV >> 8) & 0x1F]);
+							GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F], coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 						}
 					}
 					break;
 				case SpecialEffect_Brightness_Increase:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxIncreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxIncreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 				case SpecialEffect_Brightness_Decrease:
 					if(RENDERER_R_BLDCNT_IsTarget1(top))
-						color = gfxDecreaseBrightness(color, coeff[COLY & 0x1F]);
+						color = gfxDecreaseBrightness(color, coeff[RENDERER_COLY & 0x1F]);
 					break;
 			}
 		}
@@ -12200,6 +12210,8 @@ static void postRender() {
 	renderer_ctx.layers = graphics.layerEnable;
 	renderer_ctx.mosaic = MOSAIC;
 	renderer_ctx.bldmod = BLDMOD;
+	renderer_ctx.colev = COLEV;
+	renderer_ctx.coly = COLY;
 	renderer_ctx.vcount = io_registers[REG_VCOUNT];
 
 	renderer_ctx.io_registers[REG_DISPCNT] = io_registers[REG_DISPCNT];
@@ -12505,8 +12517,8 @@ static void ESPGBA_HOT mode0RenderLineFast (void)
 		if (o & 0x00010000u)
 		{
 			u32 back = espgba_colLine[x];
-			GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F],
-			                coeff[(COLEV >> 8) & 0x1F]);
+			GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F],
+			                coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 		}
 		espgba_colLine[x] = (u16)color;
 	}
@@ -12659,8 +12671,8 @@ static void ESPGBA_HOT mode1RenderLineFast (void)
 		if (o & 0x00010000u)
 		{
 			u32 back = espgba_colLine[x];
-			GFX_ALPHA_BLEND(color, back, coeff[COLEV & 0x1F],
-			                coeff[(COLEV >> 8) & 0x1F]);
+			GFX_ALPHA_BLEND(color, back, coeff[RENDERER_COLEV & 0x1F],
+			                coeff[(RENDERER_COLEV >> 8) & 0x1F]);
 		}
 		espgba_colLine[x] = (u16)color;
 	}
