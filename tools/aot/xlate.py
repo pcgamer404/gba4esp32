@@ -65,7 +65,7 @@ def main():
     rom_path, w0, w1, tag = (args[0], int(args[1], 0),
                              int(args[2], 0), args[3])
     rom = open(rom_path, "rb").read()
-    table = load_table(sys.path[0] + "/../../src/gba.cpp")
+    table = load_table(sys.path[0] + "/../../components/gba/gba.cpp")
 
     md = capstone.Cs(capstone.CS_ARCH_ARM, capstone.CS_MODE_THUMB)
     md.skipdata = True

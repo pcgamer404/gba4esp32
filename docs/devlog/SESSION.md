@@ -1,25 +1,37 @@
-# esp-gba — compact session log
+﻿# esp-gba â€” compact session log
 
-GBA emulation on a Freenove FNK0104 (ESP32-S3, 2.8" 320x240 ILI9341, ES8311
-audio, FT6336 touch, microSD), based on [44vba](https://github.com/44670/44vba).
+This file is a historical engineering log for the esp-gba project, based on
+[44vba](https://github.com/44670/44vba).
 
-## State
+The current tree targets one fixed ESP32-S3 handheld: a 320x240 ILI9341 SPI
+display, a shared-SPI microSD card, physical buttons, and no physical audio
+output device in the firmware.
+
+Many entries below document earlier hardware and intermediate firmware states.
+Those entries are intentionally retained as development history and should not
+be read as the current hardware specification.
+
+## Current state
 
 | | |
 |---|---|
-| Ruby | runs, **18.6 fps** |
-| Emerald | runs, **11.2 fps** (16MB cart) |
-| FireRed | should run (untested), 16MB cart |
-| Display | 320x240, game centred 240x160 with border |
-| UI | full-screen icon library, 5x3 grid, touch + BOOT button |
-| Audio | codec configured, I2S draining, **no sound yet** |
-| Touch | works, **calibration not yet run** |
-| SD | mounted 4-bit, `/roms`, `/saves`, `/art`, `/packed` |
+| GBA | working in the current firmware; title/game compatibility varies by ROM |
+| GB/GBC | gnuboy core integrated; GB/GBC path is working |
+| Display | 320x240 ILI9341, GBA game centred at 240x160 |
+| UI | physical-button navigation; menu touch retained, in-game touch not used |
+| Audio | physical audio output disabled in the current handheld build |
+| Saves | GBA saves and emulator save states supported; GB/GBC SRAM save path present |
+| SD | shared SPI bus, ROMs and saves stored on the card |
 
-## Board facts (measured, not from docs)
+## Historical board facts (earlier hardware)
 
-The vendor sketches are wrong for this board in two places. The schematic's
-ESP32-S3 symbol is authoritative:
+The following pin block records measurements from the earlier Freenove
+hardware iteration. It is preserved as development history; it is NOT the
+current handheld pinout. The current pinout is defined by
+`components/esp_gba/config.h`.
+
+The vendor sketches were found to be wrong for that earlier board in two
+places. The schematic's ESP32-S3 symbol was authoritative:
 
 ```
 LCD    CS 10  MOSI 11  SCK 12  MISO 13  DC 46  RST -1  BL 45
@@ -29,34 +41,34 @@ I2C    SCL 15 SDA 16          (ES8311 0x18, FT6336 0x38)
 amp    AUDIO_EN 1  -> SC8002B SHUTDOWN, 10K pull-up to 3V3
 ```
 
-GPIO 6 is **I2S_DO**, not SD D0 — hours were lost probing it as an SD line.
+GPIO 6 is **I2S_DO**, not SD D0 â€” hours were lost probing it as an SD line.
 
 ## Fixes that were not obvious
 
-1. **`config.h` missing from upstream** — `.gitignore` swallows it; the port
+1. **`config.h` missing from upstream** â€” `.gitignore` swallows it; the port
    does not compile as published.
-2. **Flash mode must be DIO** — PlatformIO's board manifest forces `qio` into
+2. **Flash mode must be DIO** â€” PlatformIO's board manifest forces `qio` into
    the image header, overriding sdkconfig. QIO makes the ROM loader misread the
    bootloader and boot-loop. QIO *does* work for the app once the IDF bootloader
-   has enabled the flash QE bit — hence `tools/flash_qio.sh`.
-3. **`emuInit()` never called `load_image_preferences()`** — no RTC, no save
-   type, so Pokémon hangs in forced blank (`DISPCNT=0x80`) rendering pure black.
+   has enabled the flash QE bit â€” hence `tools/flash_qio.py`.
+3. **`emuInit()` never called `load_image_preferences()`** â€” no RTC, no save
+   type, so PokÃ©mon hangs in forced blank (`DISPCNT=0x80`) rendering pure black.
 4. **SPI transactions cap at 32768 bytes** on the S3; the driver only checks
    `max_transfer_sz`, so a 76800-byte frame silently delivered 68 of 160 rows.
-5. **CS must stay LOW across a command and its data** — this panel discards the
+5. **CS must stay LOW across a command and its data** â€” this panel discards the
    operation otherwise. Upstream raised CS after every transfer.
 6. **`setuptools<81`** for PlatformIO's IDF builder (`pkg_resources`).
 7. **Console baud needs `ESP_CONSOLE_UART_CUSTOM=y`** or Kconfig silently keeps
    115200.
 
-## Sparse ROM — how 16MB carts fit in 13.94MB
+## Sparse ROM â€” how 16MB carts fit in 13.94MB
 
 GBA carts are padded to a power of two, and the padding is **interior**:
 FireRed is 44.5% `0xFF` with a 5.22MB hole at `0x6C7D38`.
 
 At 64KB page granularity every all-`0xFF` page is dropped on copy and aliased to
 **one shared physical page** via `spi_flash_mmap_pages()`. The emulator still
-sees a flat contiguous ROM — no paging layer, no runtime SD reads.
+sees a flat contiguous ROM â€” no paging layer, no runtime SD reads.
 
 | ROM | pages | blank | flash used |
 |---|---|---|---|
@@ -82,10 +94,10 @@ Baseline 13.0 drawn fps -> **18.6** today (Ruby).
 | 64-byte data cache line | +3% |
 | PSRAM 40 -> 80 MHz | +3% |
 | SPI 40 -> 60 MHz | 0% |
-| `-O3` | **−2%**, reverted |
+| `-O3` | **âˆ’2%**, reverted |
 | Cache burst-wrap | does not link on IDF 4.4 + octal PSRAM |
 | `vram` -> internal SRAM | impossible: PSRAM DMA hangs, so `FB` must hold it |
-| **Dual-core renderer** | **+11% emulated, drawn fps HALVED** — reverted |
+| **Dual-core renderer** | **+11% emulated, drawn fps HALVED** â€” reverted |
 
 Dual core is the interesting negative: pinning vba-next's `THREADED_RENDERER` to
 core 1 worked (after fixing upstream's missing `INIT_RENDERER_CONTEXT`), but the
@@ -106,25 +118,30 @@ self-checking:
   back out of frame memory
 - `lcdProbeRow()` samples panel RAM while the game runs
 
-That is how the black-screen and truncated-blit bugs were found — the
+That is how the black-screen and truncated-blit bugs were found â€” the
 framebuffer was always correct, only what reached the glass was wrong.
 
-## Open
+## Historical open items
 
-- **Audio silent.** Codec configures, I2S drains (`43264 frames sent`). Boot
-  now plays the same tone at both `AUDIO_EN` polarities to settle whether the
-  SC8002B's `SHUTDOWN` is active high or low.
-- **Touch calibration** not yet run (three crosshairs at boot, skips after 8s).
-- Emulator produces audio at ~30% of real time, so even once the amp works
-  expect underruns until frame rate or buffering is addressed.
+The following items were open during the earlier hardware investigation. They
+are retained as development history and are not current hardware requirements.
+
+- The earlier Freenove hardware's physical audio chain and touch controller
+  had unresolved work at this stage of the investigation.
+- Emulator performance remained below full GBA speed on the heavier workloads;
+  the later entries below record the optimization work and its measured limits.
+- The current handheld intentionally disables physical audio output.
 
 ## Usage
 
 ```bash
-ESP_GBA_BOARD=FNK0104AB ./tools/flash_qio.sh   # build + flash (NOT pio upload)
-python tools/bench.py LABEL 20 30              # reset and measure
-python tools/play.py shots "wait 240, shot x"  # UART screenshots (bridge boards)
+python tools/flash_qio.py --port COM5                 # build + flash
+python tools/bench.py LABEL 20 30                    # reset and measure
+python tools/play.py shots "wait 240, shot x"         # screenshots / input helper
 ```
+
+The current tree has one fixed ESP32-S3 hardware configuration, so there is no
+`ESP_GBA_BOARD` selection variable.
 
 ## 2026-08-19 (second session): boot loop fixed, dual-core, painter renderer
 
@@ -244,7 +261,7 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   I2C 15/16). Doc's "I2S_DOUT GPIO8" is the codec mic path, unused. The two
   speaker pins are the PH1.25 connector off the amp -- not GPIOs.
 - clkprobe.c added (boot probe + candidate sweep + hold mode, serial cmd
-  0xA5 0x07). Results in FINDINGS §8: 320-via-div1 is dead silicon myth;
+  0xA5 0x07). Results in FINDINGS Â§8: 320-via-div1 is dead silicon myth;
   VCO overdrive gives a real 278 MHz (+16% CPU AND +16% flash/PSRAM/APB).
 - 278 hold launched with Emerald(J) mid-session; save flushed to SD first
   (139264 bytes -- save FLUSH path proven on the wire). USB dies during
@@ -255,7 +272,7 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
 
 ## 2026-08-19 late night: AOT milestone 1 -> the idle-loop jackpot
 
-- Audio FIXED end to end (four stacked bugs, FINDINGS §9); game audio now
+- Audio FIXED end to end (four stacked bugs, FINDINGS Â§9); game audio now
   continuous via audioMatchRate (slow-motion pitch until full speed).
 - Save round-trip PROVEN: "SAVE: flushed 139264" + "SAVE: loaded 139264"
   across a reboot, Emerald (Japan). Task "save system works" is done for
@@ -292,7 +309,7 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   interpreter cpu 64% (arm share 38-43% = m4a mixer -> AOT target #1) and
   renderer wait 30-32% (core-1 PPU -> target #2 or painter extension).
 - Flash port note: after USB re-enumeration the device can be ttyACM1;
-  flash_qio.sh honors PORT=/dev/ttyACM1.
+  `flash_qio.py` accepts `--port /dev/ttyACM1`.
 
 ## 2026-08-20: menu touch fixed; ring widened; 38.6 in-game at stock
 
@@ -325,7 +342,7 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
 - Stock-240 in-game ladder today: 26-28 -> 33.5 (idle) -> 38.6 (ring) ->
   ~41 (no reverb). Intro/menus capped at true 59.7. 278 stacks +16% on top.
 - Flash-port gotcha: ttyACM0/ttyACM1 flips after re-enumeration; pass
-  PORT=$(ls /dev/ttyACM* | head -1) to flash_qio.sh.
+  Pass the selected port with `--port /dev/ttyACM0` (or the current `/dev/ttyACM1`).
 
 ## 2026-08-20 cont.: auto-278 ON; mixer fully disassembled
 
@@ -354,11 +371,12 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   different link address), not a second Emerald engine. hleTable:
   BPEJ=0x03001b50, BPRJ=0x03002918. The user's ROMs were renamed
   ("Pokemon Emerald JP.gba" etc) and now include LeafGreen/Sapphire.
-- Console moved to USB-Serial-JTAG (sdkconfig.defaults + sdkconfig.esp32s3
-  at the REPO ROOT are the real config files; port-esp32s3/sdkconfig is
-  stale). GPIO 43/44 freed -> 2x4 button matrix in os.c:
-  rows IO2 (dpad) / IO3 (actions), cols IO14/IO21/IO43/IO44.
-  docs/button_wiring.svg is the user-facing diagram.
+- HISTORICAL FREENOVE HARDWARE ITERATION: console moved to USB-Serial-JTAG
+  (sdkconfig.defaults + sdkconfig.esp32s3 at the REPO ROOT were the real config
+  files; the earlier ESP32-S3 sdkconfig was stale). GPIO 43/44 were freed for a 2x4
+  button matrix in that intermediate build: rows IO2 (dpad) / IO3 (actions),
+  cols IO14/IO21/IO43/IO44. `docs/button_wiring.svg` belonged to that hardware
+  iteration and is not the current button wiring.
 - Debug overlay moved OUT of the game window into a 240x10 border strip
   above it (text + 4-bar battery from GPIO9=ADC1_CH8, x2 divider). Tap the
   top border in-game to toggle. Drawn/blitted once per second.
@@ -401,7 +419,7 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
   real GBC needs gnuboy. Vendored retro-go's gnuboy into components/gnuboy
   (cpu/hw/lcd/sound/gnuboy.c, ~1MB with docs); reference glue saved at
   scratchpad rg/retro-core/main/main_gbc.c. NEXT SESSION: write
-  port-esp32s3 glue (gnuboy_init/load/run + pix blit 160x144 + matched
+  components/esp_gba glue (gnuboy_init/load/run + pix blit 160x144 + matched
   audio + matrix keys + .gb/.gbc menu routing + SRAM saves), THEN enable
   the extensions in sd.c scan.
 - Peanut-GB header also vendored under components/gb (unused for now;
@@ -495,9 +513,10 @@ near-full speed. Board still needs an SD card for Emerald/FireRed + saves.
 - DEAD END, do not retry: CONFIG_SPIRAM_FETCH_INSTRUCTIONS/RODATA do NOT free
   mmap pool pages -- they remap the same VA to PSRAM, entries stay busy
   (measured: still 244/256). Reverted.
-- BUILD GOTCHA: plain `pio run` builds the GENERIC board (undefined
-  lcdFillScreen at link if lucky, wrong pins if not). Always
-  `ESP_GBA_BOARD=FNK0104AB pio run` / use tools/flash_qio.sh with that env.
+- BUILD GOTCHA (historical): the old tree required a board-selection
+  environment variable to select the Freenove hardware. The current tree has
+  one fixed ESP32-S3 handheld target, so plain `pio run` builds the correct
+  hardware configuration. Flash with `python tools/flash_qio.py`.
   Also penv needs setuptools<81 after any PlatformIO update (pkg_resources).
 
 ## 2026-08-20 night: the SECOND FireRed "not booting" -- damaged SD data, proven byte-by-byte

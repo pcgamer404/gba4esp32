@@ -1,198 +1,819 @@
-# esp-gba — a GBA / GB / GBC handheld on an ESP32-S3
+﻿# esp-gba â€” custom ESP32-S3 GBA / GB / GBC handheld
 
-![The finished handheld](docs/photos/finished.jpg)
+A stripped and rebuilt ESP32-S3 handheld firmware derived from the original
+[Charlanth/esp32-gba](https://github.com/Charlanth/esp32-gba) project.
 
-| | | |
-|---|---|---|
-| ![Menu](shots/06-menu.png) | ![Title](shots/04-title.png) | ![In-game](shots/09-birch.png) |
+This repository targets a **fixed custom handheld configuration** rather than a
+generic multi-board port.
 
-A pocket emulator console built on the Freenove FNK0104 board (ESP32-S3, 2.8"
-ILI9341 320x240, ES8311 audio codec, SD slot, LiPo charging). It plays Game
-Boy Advance titles with sound and correct rendering, and Game Boy /
-Game Boy Color titles at a locked 60 fps.
+> **Hardware target:** ESP32-S3 **N16R8** â€” **16 MB flash + 8 MB octal PSRAM** â€”
+> with a **320Ã—240 ILI9341 SPI display**, microSD storage, and the physical
+> buttons defined in `components/esp_gba/config.h`.
 
-Forked from [44vba](https://github.com/44670/44vba) (itself a
-[vba-next](https://github.com/libretro/vba-next) fork); GB/GBC support is
-[gnuboy](https://github.com/rofl0r/gnuboy) as vendored by
-[retro-go](https://github.com/ducalex/retro-go).
+The hardware is already assembled and working. This repository is a software
+cleanup and adaptation of the original project: obsolete board targets,
+desktop ports, duplicate source trees, unused libraries, stale documentation,
+and development-only artifacts have been removed or relocated.
 
-## Features
+---
 
-- **GBA** via vba-next with a native (HLE) m4a audio mixer and idle-loop
-  skip, both discovered per cart by scanning (no game tables to maintain).
-  Rendering is verified-correct (screenshot-audited); 9-35 fps depending
-  on title and scene, with the speed work ongoing.
-- **GB / GBC** via gnuboy at a locked 60 fps, scaled 1.5x to 240x216.
-- **Sound** through the board's ES8311 codec + speaker, rate-matched to the
-  emulator's real speed so audio never crackles or drifts.
-- **Game library menu** with box art from the SD card, button navigation,
-  battery/charge readout, and a settings screen.
-- **Saves**: GBA save flash persists to `/sd/saves/<game>.sav`; GB cart SRAM
-  autosaves to `/sd/saves/<game>.srm`.
-- **Charging indicator**: `CHG` in the menu footer (and a `+` next to the
-  in-game battery gauge) whenever USB power is present.
-- **Physical controls only** in-game: a 2x4 button matrix covers the full
-  GBA pad, including L/R via Select-combos.
+## What this project is
 
-## Parts list
+The original project was an experimental ESP32-S3 GBA port based around VBA-next
+and the Freenove ESP32-S3 display hardware.
 
-What one unit is built from:
+This repository keeps the useful emulator and ESP32 work, but turns it into a
+single-purpose handheld firmware for the current hardware.
 
-| Part | Notes |
-|---|---|
-| ESP32-S3 2.8" LCD dev board | "2.8 LCD Display ESP32-S3 240x320 Capacitive Touch" (Freenove FNK0104-class / CYD variant): ESP32-S3 R8, 16 MB flash, 8 MB PSRAM, ILI9341 panel, ES8311 codec, SD slot, TP4054 charger |
-| LiPo battery | 103450 3.7 V 2000 mAh (7.4 Wh) |
-| Speaker | small 8 Ω oval, driven by the board's SC8002B amp |
-| Tactile switches ×8 | D-pad ×4, A, B, Select, Start — on solderable mini breadboards / custom PCB |
-| Hook-up wire + JST connectors | button matrix and battery leads |
-| 3D-printed case | models in [hardware/case/](hardware/case/) |
-| M2/M2.5 heat-set inserts + screws | case assembly |
+The main upstream/original project is:
 
-Custom PCBs and printable case models live under [hardware/](hardware/).
+- **Original project:** [Charlanth/esp32-gba](https://github.com/Charlanth/esp32-gba)
+- **GBA core lineage:** [44670/44vba](https://github.com/44670/44vba) â†’ [libretro/vba-next](https://github.com/libretro/vba-next)
+- **GB/GBC core:** [rofl0r/gnuboy](https://github.com/rofl0r/gnuboy)
+- **GB/GBC reference/vendor source:** [ducalex/retro-go](https://github.com/ducalex/retro-go)
 
-## Build photos
+The current repository should therefore be viewed as a **hardware-specific
+derivative**, not as a clean upstream fork with every original target intact.
 
-| Parts | Assembly |
-|---|---|
-| ![Parts](docs/photos/build-parts.jpg) | ![Assembly](docs/photos/assembly.jpg) |
+---
 
-## Hardware
+# Features
 
-| Part | Detail |
-|---|---|
-| Board | Freenove FNK0104 (ESP32-S3, 16 MB quad flash, 8 MB octal PSRAM) |
-| Screen | 2.8" ILI9341, 320x240, SPI at 55 MHz (59.6 under overclock) |
-| Audio | ES8311 codec + SC8002B amp, I2S |
-| Storage | micro-SD (SDMMC 4-bit) for ROMs, art, and saves |
-| Power | LiPo + on-board TP4054 charger (~100 mA) |
-| Buttons | 2x4 matrix on free GPIOs — rows 2/3, columns 14/21/43/44 |
+## Game Boy Advance
 
-Wiring: see [WIRING.md](WIRING.md) and the diagram in
-[docs/button_wiring.svg](docs/button_wiring.svg). Each button simply bridges
-its row pin to its column pin; rows are open-drain, columns use internal
-pull-ups, no external resistors needed.
+- VBA-next based GBA emulation.
+- 240Ã—160 native GBA framebuffer centered on the 320Ã—240 ILI9341.
+- SD-based ROM library and boot-time ROM picker.
+- Sparse ROM packing so large padded cartridges can fit the available ROM
+  partition when their distinct 64 KB pages fit.
+- Per-cartridge discovery for the GBA optimizations that were added during
+  development.
+- Persistent GBA save support through the SD card.
+- Native USB-Serial-JTAG control path for development tools and scripted
+  testing.
+- Optimized threaded rendering and other measured performance work retained
+  from the development process.
 
-## Controls
+## Game Boy / Game Boy Color
 
-The console has 8 physical buttons (D-pad, A, B, Start, Select) plus the
-board's BOOT button on the bottom edge. The GBA's shoulder buttons have no
-physical switches — they are **Select-combos**, which gen-3 Pokémon (and
-most GBA games) only use for optional shortcuts:
+- GB/GBC emulation through vendored **gnuboy**.
+- Library routing by `.gb` / `.gbc` extension.
+- Full-screen 320Ã—240 presentation using the GB/GBC scaler.
+- Locked 60 fps on the supported GB/GBC path.
+- SRAM save support.
+- In-game settings menu.
+- Selectable emulation speed: **1.0Ã— / 1.5Ã— / 2.0Ã— / 2.5Ã—**.
+- **Save State 1 / Load State 1** and **Save State 2 / Load State 2**.
+- Save Game, Reset Game, Exit to Main Menu, and Resume options.
 
-**In game**
+---
 
-| Input | Action |
-|---|---|
-| D-pad / A / B / Start / Select | the GBA pad, 1:1 |
-| **Select + Left** (hold Select, tap Left) | **L shoulder** |
-| **Select + Right** (hold Select, tap Right) | **R shoulder** |
-| Select + Up | toggle the fps/debug overlay strip |
+# Controls
 
-A short Select press on its own still reaches the game (menus, party
-switching) — the combo only fires while a direction is pressed with it.
+The current firmware uses **individual active-low buttons**, not the old
+Freenove 2Ã—4 matrix.
 
-**In the game picker**
+The exact GPIO assignments are kept in:
 
-| Input | Action |
-|---|---|
-| D-pad | move the selection |
-| A or Start | play the highlighted game |
-| Select (or the gear icon by touch) | settings: volume, debug overlay, overclock, native audio |
-| Touch: left/right screen edge | previous/next library page |
-| BOOT button short press | next game (for units without the button matrix) |
-| BOOT button long press | play |
-
-**In settings**: Up/Down select a row, A toggles, Left/Right adjust the
-volume, B goes back. All settings persist across power cycles.
-
-Nothing auto-starts: the console always boots to the picker and waits.
-
-## SD card layout
-
-```
-/roms/     game files: .gba, .gb, .gbc
-/art/      optional box art: <rom name without extension>.raw
-           (48x48 RGB565 big-endian; tools/scrape_art.py fetches these)
-/saves/    created automatically
-/packed/   pack cache, created automatically (safe to delete)
+```text
+components/esp_gba/config.h
 ```
 
-## Build & flash
+Current map:
 
-**Step-by-step for Linux and Windows: [FLASHING.md](FLASHING.md).** Short
-version, once [PlatformIO](https://platformio.org) is installed:
+| Button | GPIO |
+|---|---:|
+| Up | 8 |
+| Down | 6 |
+| Left | 7 |
+| Right | 15 |
+| A | 47 |
+| B | 40 |
+| Select | 5 |
+| Start | 2 |
+| GBA L | 1 |
+| GBA R | 21 |
+
+Buttons use the ESP32-S3 internal pull-ups.
+
+## Select + Start
+
+`Select + Start` has a deliberate different role depending on the running
+system:
+
+- **GBA:** hold `Select + Start` for about 1.5 seconds to leave the game and
+  return to the main menu.
+- **GB/GBC:** `Select + Start` opens the **Game Settings** screen.
+
+The GB/GBC settings screen contains:
+
+```text
+GAME SETTINGS
+Speed
+Save State 1
+Load State 1
+Save State 2
+Load State 2
+Save Game
+Reset Game
+Exit to Main Menu
+Resume
+```
+
+For GB/GBC, `B` resumes/backs out, while the directional buttons navigate the
+settings and `A` selects/toggles.
+
+---
+
+# Hardware
+
+## ESP32-S3
+
+- ESP32-S3
+- 16 MB flash
+- 8 MB octal PSRAM
+- Native USB-Serial-JTAG
+- Hardware configuration is fixed in `components/esp_gba/config.h`
+
+## Display
+
+- ILI9341
+- 320Ã—240
+- SPI
+- 40 MHz configured in the current hardware port
+- Display reset is tied to the ESP32-S3 reset line
+- LCD readback is disabled in the normal firmware path
+- The GBA game image remains 240Ã—160 and is centered on the LCD
+
+Current LCD wiring:
+
+| Signal | GPIO |
+|---|---:|
+| CS | 10 |
+| DC | 11 |
+| SCK | 12 |
+| MOSI | 13 |
+| MISO | 9 |
+| Backlight | 14 |
+
+## SD card
+
+The SD card shares the SPI bus with the LCD:
+
+| Signal | GPIO |
+|---|---:|
+| CS | 18 |
+| SCK | 12 |
+| MOSI | 13 |
+| MISO | 9 |
+
+## Audio
+
+### Current build: physical audio disabled
+
+The current handheld build deliberately disables **physical audio output**.
+
+In `components/esp_gba/main.cpp` the build contains:
+
+```cpp
+#define MY_RETROGO_NO_AUDIO 1
+```
+
+The surrounding code checks this define before initializing the physical audio
+path.
+
+The reason is deliberate: this repository was cleaned around the current
+handheld hardware configuration, while the original project contains a
+Freenove-specific ES8311/SC8002B audio path. Rather than leaving a misleading
+or board-specific audio initialization path enabled, the current build keeps
+the emulator sound-processing code where the core requires it, but does not
+initialize a physical output device.
+
+This is a **software disable**, not removal of the original audio work.
+
+### Re-enabling audio from the original project
+
+The original implementation can be used as the reference for restoring audio:
+
+[Charlanth/esp32-gba](https://github.com/Charlanth/esp32-gba)
+
+The original tree contains the ES8311/I2S implementation and the associated
+Freenove hardware configuration.
+
+The current software gate is:
+
+```cpp
+#define MY_RETROGO_NO_AUDIO 1
+```
+
+in:
+
+```text
+components/esp_gba/main.cpp
+```
+
+To bring physical audio back, the ES8311/I2S initialization path and its GPIO
+configuration from the original project must be restored and the
+`MY_RETROGO_NO_AUDIO` guard changed/removed accordingly.
+
+**Important:** removing the define alone does not create an audio device. The
+audio code must match the actual hardware wiring. The original audio path is
+specific to the hardware used by the original project, so only re-enable it
+when the target hardware has a compatible codec/amplifier and matching I2S
+connections.
+
+---
+
+# What was removed from the original repository
+
+This repository intentionally does **not** keep every directory from the
+original project.
+
+The goal was to remove code that is unrelated to the standalone handheld
+firmware, reduce ambiguity, and make the repository easier to build and
+maintain.
+
+## Removed or stripped
+
+### `libretro/`
+Removed because the standalone handheld build does not use the libretro
+frontend/library tree.
+
+### `libretro-common/`
+Removed together with the unused libretro frontend support.
+
+### `port-sdl2/`
+Removed because this repository is no longer maintaining a desktop SDL port.
+The handheld firmware is the product target.
+
+### Root `src/`
+Removed as a duplicate/old project layout after the GBA core was moved into:
+
+```text
+components/gba/
+```
+
+### `video/`
+Removed because it belonged to the old project layout and was not part of the
+current standalone ESP32-S3 firmware.
+
+### `shots/`
+Removed from the old location; screenshots are kept under:
+
+```text
+docs/screenshots/
+```
+
+### Old test/development documents
+Obsolete vendored test/document artifacts such as old CPU reference PDFs and
+unused test archives were removed to keep the repository focused on firmware.
+
+### Old board-specific build files
+Removed obsolete files tied to the previous board arrangement, including the
+old port-local CMake/sdkconfig/partition and Windows flash helper files.
+
+### `tools/flash_qio.sh`
+Removed because the repository now uses the cross-platform Python helper:
+
+```text
+tools/flash_qio.py
+```
+
+### Old board-selection code
+The previous `FNK0104AB`/generic board selection path was removed.
+
+The current firmware is a **single fixed hardware target**. There is no
+`ESP_GBA_BOARD=...` selection anymore.
+
+### Old button-matrix firmware
+The old Freenove 2Ã—4 GPIO matrix implementation was removed.
+
+The current firmware reads the actual individual buttons directly from the GPIO
+assignments in `config.h`.
+
+---
+
+# What was kept
+
+The cleanup did not remove code just because it came from upstream.
+
+Important files and components remain because the firmware depends on them.
+
+## `components/gba/`
+
+The GBA core and its required support files now live in a normal ESP-IDF
+component.
+
+## `components/gnuboy/`
+
+The GB/GBC emulator is kept as the second emulation engine.
+
+## `components/esp_gba/`
+
+This is the handheld port:
+
+- display
+- SD card
+- buttons
+- menu
+- ROM loading/packing
+- save handling
+- serial control
+- timing/performance work
+
+---
+
+# Tools
+
+Every script in `tools/` has a specific development or maintenance purpose.
+
+| Tool | Role |
+|---|---|
+| `flash_qio.py` | Builds the firmware and flashes the QIO app with a DIO-patched bootloader. |
+| `flash_qio.py` / `patch_qio.py` | The QIO helper uses `patch_qio.py` to convert the bootloader image back to DIO before flashing. |
+| `bench.py` | Runs the benchmark harness and reports emulator/drawn performance. |
+| `bench_pick.py` | Selects a ROM over the serial control channel, waits for boot, and reports emu/draw performance. |
+| `play.py` | Sends scripted key input and requests framebuffer screenshots over the development serial channel. |
+| `record.py` | Development recording/capture helper for the serial framebuffer path. |
+| `capture_boot.py` | Captures/parses boot-time serial output for development diagnostics. |
+| `pack_rom.py` | Creates the sparse `.pak` + `.map` ROM cache on a PC before copying it to the SD card. |
+| `trim_rom.py` | Removes trailing ROM padding from a cartridge image; it does not remove interior holes. |
+| `patch_qio.py` | Patches a bootloader image from QIO back to DIO for the ESP32-S3 ROM-loader constraint. |
+| `scrape_art.py` | Fetches/converts game box art into the small RGB565 `.raw` files used by the menu. |
+| `bench_pick.py` | Automates ROM selection and performance measurement through the firmware command channel. |
+| `bench.py` | General benchmark runner used for repeated performance measurements. |
+| `hotpc_report.py` | Converts the hot-PC profiler output into a report for identifying execution hotspots. |
+| `tools/aot/xlate.py` | Development translator used for experimental static ARM/Thumb block translation. |
+| `tools/aot/mixer_full.txt` | Disassembly/reference notes for the GBA m4a mixer investigation. |
+| `tools/aot/mixer_notes.md` | Notes describing the native mixer reverse-engineering work. |
+
+Some tools are development aids rather than tools required for normal users.
+
+---
+
+# SD card layout
+
+Create/use the following directories on the microSD card:
+
+```text
+/roms/
+/art/
+/saves/
+/packed/
+```
+
+## ROMs
+
+Put:
+
+```text
+.gba
+.gb
+.gbc
+```
+
+files in:
+
+```text
+/roms/
+```
+
+## Box art
+
+Optional box art goes in:
+
+```text
+/art/
+```
+
+using the ROM filename without the extension and the format generated by
+`scrape_art.py`.
+
+## Saves
+
+The firmware creates/uses:
+
+```text
+/saves/
+```
+
+for game saves and GB/GBC SRAM.
+
+Examples:
+
+```text
+Pokemon Emerald.sav
+Pokemon Crystal.srm
+```
+
+## Packed ROM cache
+
+The sparse ROM cache uses:
+
+```text
+/packed/
+```
+
+with `.pak` and `.map` files.
+
+The cache can be deleted safely; it will be rebuilt when required.
+
+---
+
+# Build environment
+
+The project uses:
+
+- PlatformIO
+- ESP-IDF through PlatformIO
+- Espressif32 platform `5.4.0`
+- ESP32-S3 environment named `esp32s3`
+
+The active build configuration is in:
+
+```text
+platformio.ini
+```
+
+The hardware definition is in:
+
+```text
+components/esp_gba/config.h
+```
+
+---
+
+# Build
+
+## Normal build
+
+From the repository root:
+
+```bash
+pio run
+```
+
+or:
+
+```bash
+pio run -e esp32s3
+```
+
+The project uses the `esp32s3` environment as the handheld target.
+
+## Windows
+
+PowerShell:
+
+```powershell
+pio run -e esp32s3
+```
+
+## Linux
+
+```bash
+pio run -e esp32s3
+```
+
+---
+
+# Clean build
+
+## Normal PlatformIO clean
+
+```bash
+pio run -t clean
+```
+
+## Full build-directory removal
+
+Windows PowerShell:
+
+```powershell
+Remove-Item -Recurse -Force .pio
+```
+
+Linux/macOS:
+
+```bash
+rm -rf .pio
+```
+
+A full `.pio` removal is useful after changing CMake environment variables,
+board definitions, or other settings that require a clean reconfiguration.
+
+---
+
+# Headless build
+
+The project has an optional headless mode for emulator/core testing.
+
+It skips LCD initialization and GPIO setup.
+
+## Windows PowerShell
+
+```powershell
+$env:ESP_GBA_HEADLESS="1"
+pio run -e esp32s3
+Remove-Item Env:ESP_GBA_HEADLESS
+```
+
+## Linux/macOS
+
+```bash
+ESP_GBA_HEADLESS=1 pio run -e esp32s3
+```
+
+Headless mode is intended for development and testing, not normal handheld
+operation.
+
+---
+
+# Flashing
+
+## Important: use `flash_qio.py`
+
+The ESP32-S3 flash setup requires the application to remain QIO while the
+bootloader image is patched back to DIO.
+
+Use:
+
+```text
+tools/flash_qio.py
+```
+
+Do **not** use:
+
+```bash
+pio run -t upload
+```
+
+The helper performs:
+
+1. firmware build
+2. bootloader QIO â†’ DIO patching
+3. partition image selection
+4. firmware/bootloader flashing with esptool
+
+## Windows
+
+Example:
+
+```powershell
+python tools\flash_qio.py --port COM5
+```
+
+Replace `COM5` with the actual serial port.
+
+## Linux
+
+Example:
+
+```bash
+python tools/flash_qio.py --port /dev/ttyACM0
+```
+
+The port can be omitted when automatic detection works:
 
 ```bash
 python tools/flash_qio.py
 ```
 
-Never use `pio run -t upload`: this board needs a DIO-patched bootloader
-with the QIO app, which the script handles (details in
-[README-esp-gba.md](README-esp-gba.md)).
+## Flash from a completely clean build
 
-For a factory-fresh state (default settings), also erase NVS once:
+Windows:
+
+```powershell
+Remove-Item -Recurse -Force .pio
+pio run -e esp32s3
+python tools\flash_qio.py --port COM5
+```
+
+Linux/macOS:
+
+```bash
+rm -rf .pio
+pio run -e esp32s3
+python tools/flash_qio.py --port /dev/ttyACM0
+```
+
+The flash helper itself also performs the build, so the most common command is
+simply:
+
+```bash
+python tools/flash_qio.py --port COM5
+```
+
+---
+
+# Factory/fresh-settings reset
+
+The firmware stores user settings in NVS.
+
+To clear the NVS region, use esptool through PlatformIO.
+
+## Linux/macOS
 
 ```bash
 pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port /dev/ttyACM0 erase_region 0x9000 0x6000
 ```
 
-## Performance notes
+## Windows PowerShell
 
-The native audio mixer (default on) plus an optional 278 MHz overclock
-(default off; settings screen; engages ~10 s into gameplay and never in
-the menu) run gen-3 Pokémon at 50-60 fps at stock clocks, with rendering
-verified correct frame-by-frame. Faster renderer
-paths exist in-tree but are unrouted until they pass the same
-screenshot audit that caught them rendering white. The overclock
-overdrives the shared PLL, which also pushes the flash clock ~8% out of
-spec — safe for reads, but not for writes — so the firmware automatically
-drops to stock around every flash/NVS write (game copies, settings saves)
-and re-engages afterwards. It can be turned off in the settings screen;
-all settings persist in NVS across power cycles.
-
-A serial control channel (1.5 Mbaud on the USB port, `0xA5`-framed commands
-in `port-esp32s3/main/os.h`) supports scripted picks, benchmarks, screenshots,
-file push, and live tuning — everything `tools/*.py` uses.
-
-## Repository layout
-
-```
-src/, libretro*/      vba-next core (GBA)
-components/gnuboy/    gnuboy core (GB/GBC)
-port-esp32s3/         this port: display, audio, SD, menu, input, serial
-tools/                flash script, benchmark/screenshot/art tooling
-docs/                 wiring diagram, dev logs (docs/devlog/)
-port-sdl2/            44vba's desktop port, kept as the reference implementation
+```powershell
+pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 --port COM5 erase_region 0x9000 0x6000
 ```
 
-## Compatibility
+Then flash the firmware again with `tools/flash_qio.py`.
 
-Every game below was packed, byte-verified, booted, played past its title
-with real input, and screenshot-checked by the automated suite
-(`emu` fps in menu/attract scenes, stock 240 MHz):
+Use this when you need a clean settings state rather than simply rebuilding the
+firmware.
 
-| Game | fps | Game | fps |
-|---|---|---|---|
-| Pokémon FireRed (US 59.7 / JP 59.1) | ~60 | Sonic Advance 2 | 34 |
-| Pokémon Ruby (US) | 58.9 | Metroid Fusion | 32 |
-| Golden Sun | 57.9 | Mario Kart Super Circuit | 31 |
-| Metroid Zero Mission | 55.5 | Zelda: The Minish Cap | 22 |
-| Pokémon Emerald (US/JP) | 47-55 | FFVI Advance | 16 |
-| Pokémon LeafGreen (JP) | 52.4 | Aria of Sorrow | 16 |
-| | | Kirby / Advance Wars / SMA4 | 11-13 |
+---
 
-GB/GBC titles run at a locked 60. Any cart fits whose *distinct* 64 KB
-pages number ≤ 229 — identical padding pages are stored once, which is how
-16 MB carts fit in the 14.4 MB rom partition. The one known exception is
-Fire Emblem (US): 16 MB of pure unique content, refused with an on-screen
-message rather than truncated.
+# Serial development tools
 
-## Credits
+The firmware uses the ESP32-S3 native USB-Serial-JTAG path.
 
-- [44670/44vba](https://github.com/44670/44vba) — the ESP32 port this grew from
-- [libretro/vba-next](https://github.com/libretro/vba-next) — the GBA core
-- [ducalex/retro-go](https://github.com/ducalex/retro-go) — the gnuboy fork used for GB/GBC
-- Freenove — FNK0104 board documentation
+The control protocol is defined in:
 
-Development history, measurements, and the reasoning behind every port
-decision live in [docs/devlog/](docs/devlog/).
+```text
+components/esp_gba/os.h
+```
+
+Development tools such as:
+
+```text
+bench.py
+bench_pick.py
+play.py
+record.py
+capture_boot.py
+```
+
+use that interface for automated testing, scripted input, framebuffer capture,
+and performance measurements.
+
+The normal handheld does not require these tools.
+
+---
+
+# Repository layout
+
+```text
+components/
+  gba/                  GBA emulator/core
+  gnuboy/               GB/GBC emulator
+
+components/esp_gba/
+  main/                 Handheld application and hardware port
+
+tools/
+  flash_qio.py          Build + flash helper
+  pack_rom.py           Sparse ROM cache creation
+  trim_rom.py           Trailing ROM padding removal
+  scrape_art.py         Box-art conversion/fetching
+  bench*.py             Performance tools
+  play.py               Input/screenshot tool
+  aot/                  Experimental translation tooling
+
+docs/
+  screenshots/          Current project screenshots
+  devlog/               Historical engineering notes
+  photos/               Build photographs
+
+hardware/
+  README.md             Hardware documentation
+  case/                 Case information
+  pcb/                  PCB information
+```
+
+---
+
+# Development history and major changes
+
+This repository contains a substantial amount of work beyond the original
+ESP32-GBA starting point.
+
+Among the major changes are:
+
+- fixed the project around the current ESP32-S3 handheld hardware
+- replaced old generic/Freenove board-selection logic with one real `config.h`
+- moved the GBA core into `components/gba/`
+- added and integrated GB/GBC support through gnuboy
+- added the SD-based ROM library and menu
+- added sparse ROM packing/caching for larger GBA cartridges
+- added persistent save handling
+- added box-art support
+- added native USB-Serial-JTAG control
+- added scripted ROM selection and benchmark tooling
+- added GBA/GB/GBC settings handling
+- added GB/GBC speed selection
+- added GB/GBC save states
+- added `Select + Start` context-sensitive controls
+- added measured renderer and emulator optimizations
+- added headless build support
+- removed obsolete desktop/libretro code and old board-specific code
+
+The detailed engineering history is retained under:
+
+```text
+docs/devlog/
+```
+
+Those files contain historical experiments, measurements, failures, and fixes.
+They should not be treated as the current hardware wiring reference.
+
+---
+
+# Current hardware reference
+
+For the authoritative current pinout, use:
+
+```text
+components/esp_gba/config.h
+WIRING.md
+```
+
+The firmware is intentionally tied to that hardware configuration.
+
+Do not copy the old FNK0104 matrix wiring from historical documentation into
+a new build; that support was removed as part of the cleanup.
+
+---
+
+# Performance notes
+
+Performance is title/scene dependent.
+
+The repository contains a large amount of measured optimization work in:
+
+```text
+docs/devlog/FINDINGS.md
+docs/devlog/SESSION.md
+```
+
+The key point for users is that GBA speed is not identical across all titles,
+while the GB/GBC path is designed around a locked 60 fps presentation.
+
+Benchmarks in the development logs are measurements from specific ROMs,
+specific scenes, and specific firmware revisions. They are therefore useful
+for engineering comparison but should not be interpreted as a universal
+per-game guarantee.
+
+---
+
+# Screenshots
+
+Current screenshots live in:
+
+```text
+docs/screenshots/
+```
+
+Build photos live in:
+
+```text
+docs/photos/
+```
+
+---
+
+# Credits
+
+This project stands on the work of the upstream projects below:
+
+- **Charlanth/esp32-gba** â€” original ESP32-S3 GBA port and the starting point for
+  this repository:
+  https://github.com/Charlanth/esp32-gba
+- **44vba** â€” GBA emulator/ESP32 work that this project grew from:
+  https://github.com/44670/44vba
+- **VBA-next** â€” upstream GBA core lineage:
+  https://github.com/libretro/vba-next
+- **gnuboy** â€” Game Boy emulator:
+  https://github.com/rofl0r/gnuboy
+- **retro-go** â€” reference/vendor source used for the GB/GBC side:
+  https://github.com/ducalex/retro-go
+- **Freenove** â€” original board documentation relevant to the inherited hardware
+  work.
+
+---
+
+# Status
+
+This repository is intended to be a **standalone firmware project for the
+current ESP32-S3 handheld**.
+
+It is no longer a generic collection of all targets present in the original
+repository. The code, configuration, documentation, and tools are deliberately
+focused on one hardware configuration so that a fresh checkout has a clear
+build target and a clear flashing procedure.
+
+For current hardware wiring, use `WIRING.md`.
+
+For historical engineering decisions, use:
+
+```text
+docs/devlog/FINDINGS.md
+docs/devlog/SESSION.md
+```

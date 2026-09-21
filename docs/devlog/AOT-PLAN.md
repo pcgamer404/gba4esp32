@@ -1,6 +1,6 @@
-# AOT static recompile: ARM -> C -> Xtensa, flash XIP
+﻿# AOT static recompile: ARM -> C -> Xtensa, flash XIP
 
-The only known path to true 60fps-with-audio (FINDINGS §7c: interpreter needs
+The only known path to true 60fps-with-audio (FINDINGS Â§7c: interpreter needs
 a ~35% cpi cut at 240 MHz, ~25% at 278). The S3 cannot JIT (no RWX PSRAM
 aperture), but it can run unlimited precompiled code from flash XIP through
 the icache. So: translate the ROM's hot code AT PACK TIME on the PC, compile
@@ -16,20 +16,20 @@ the effort, and the generated code is portable to the SDL port for testing.
 
 ## Pipeline
 
-1. `tools/aot/scan.py` — walk the packed ROM (.pak) plus the IWRAM-copied
+1. `tools/aot/scan.py` â€” walk the packed ROM (.pak) plus the IWRAM-copied
    regions (m4a mixer!). Static discovery: follow BL/BLX/B trees from the
    entry vector and the m4a SoundMain entry; mark basic blocks with start PC,
    mode (ARM/Thumb), and exit kind (fallthrough, branch, call, computed).
    The profiler's hot-PC histogram (add a BENCH dump of top interpreted PCs)
    picks which blocks are WORTH translating: target the top ~200KB of blocks
    covering ~90% of executed instructions.
-2. `tools/aot/xlate.py` — per block, emit one C function
+2. `tools/aot/xlate.py` â€” per block, emit one C function
    `void aot_<pc>(void)` doing the ALU work on cached locals, writing flags
    only when a later instruction in the block reads them (flag liveness kills
    ~40% of the emitted work), calling the existing memory helpers
    (CPUReadMemory etc.) for loads/stores, and ending by setting
    `bus.armNextPC` + returning the consumed cycle count.
-3. Generated output `port-esp32s3/main/aot_gen/<game>.c` (one file per game,
+3. Generated output `components/esp_gba/main/aot_gen/<game>.c` (one file per game,
    selected by header game code at build time, or a side flash partition
    mmap'd XIP if multiple games must coexist).
 4. Runtime: a `pcToFunc` open-addressed hash (PC>>1 -> fn ptr) checked in
@@ -55,7 +55,7 @@ At 278 MHz that clears the 60fps budget with margin for audio.
 
 ## Milestones
 
-1. BENCH hot-PC histogram dump (firmware, ~1h) — sizing data.
+1. BENCH hot-PC histogram dump (firmware, ~1h) â€” sizing data.
 2. scan.py block discovery on FireRed/Emerald, coverage report vs histogram.
 3. xlate.py for the 20 most common ARM ALU/LDR/STR forms; SDL diff harness.
 4. m4a mixer translated end-to-end (the single hottest stable target).

@@ -1,183 +1,188 @@
-# Wiring guide — esp-gba handheld
+﻿# Hardware reference â€” esp-gba handheld
 
-Written for someone who has not done much wiring. Read "Pins you must not use" first;
-it is the part that quietly ruins boards.
+This document describes the fixed hardware pinout used by the current
+ESP32-S3 handheld firmware.
 
-Everything here matches the pin numbers in `port-esp32s3/main/os.h`. Change one, change
-the other.
-
----
-
-## The one rule that matters
-
-**The ESP32-S3 runs at 3.3 V logic and is not 5 V tolerant.** Putting 5 V on any GPIO can
-permanently damage the chip. Modules that say "5 V" usually mean *their power input* is 5 V
-while their data pins are still 3.3 V — but check each one before connecting.
-
-Second rule: **everything shares a common GND.** Every module, the battery, the board. If
-grounds are not tied together, nothing works and the symptoms look random.
+The firmware is built specifically for this hardware. The pin assignments
+below must match `components/esp_gba/config.h`.
 
 ---
 
-## Pins you must not use
+## Important
 
-| Pins | Why |
-|---|---|
-| **26–37** | Wired to the flash chip and the octal PSRAM. Using them crashes the board. Non-negotiable on this module. |
-| **0, 3, 45, 46** | Strapping pins — sampled at reset to pick boot mode. GPIO 0 low at power-on = USB download mode, so the console just won't boot. |
-| **43, 44** | UART0 console (TX/RX). You need these for flashing and logs. |
-| **19, 20** | Native USB D−/D+. |
+The ESP32-S3 uses 3.3 V GPIO logic.
 
-Free and safe: **1, 2, 4–18, 21, 38–42, 47, 48**.
+All GPIOs used by the firmware are active-low button inputs with the ESP32-S3
+internal pull-up enabled.
 
-Upstream's button map used 0, 45 and 46. I remapped it — see the button table below.
+Do not reuse GPIOs connected internally to the ESP32-S3 module's flash or PSRAM.
 
 ---
 
-## 1. Screen — ILI9341 2.4" 320×240 SPI
+## 1. LCD â€” ILI9341 320Ã—240 SPI
 
-Most of these modules are the red "TFT_SPI 2.4" boards with 14 pins. They have a 3.3 V
-regulator and often a level shifter, so `VCC` takes 5 V or 3.3 V — but **feed it 3.3 V** and
-you sidestep the whole question.
+The display is an ILI9341 panel running in landscape orientation.
 
-| Display pin | ESP32-S3 | Notes |
-|---|---|---|
-| `VCC` | 3V3 | |
+| LCD signal | ESP32-S3 GPIO | Notes |
+|---|---:|---|
+| `CS` | 10 | LCD chip select |
+| `DC` | 11 | Data / command |
+| `SCK` | 12 | SPI clock |
+| `MOSI` / `SDI` | 13 | SPI data |
+| `MISO` / `SDO` | Not connected | LCD readback is disabled |
+| `RESET` | Not connected | LCD reset is tied to the ESP32-S3 reset line |
+| `LED` / backlight | 14 | Firmware-controlled backlight |
+| `VCC` | 3.3 V | |
 | `GND` | GND | |
-| `CS` | GPIO 11 | chip select |
-| `RESET` | GPIO 21 | |
-| `DC` / `RS` | GPIO 10 | data/command |
-| `SDI` / `MOSI` | GPIO 13 | |
-| `SCK` | GPIO 12 | |
-| `LED` | 3V3 (see note) | backlight |
-| `SDO` / `MISO` | GPIO 14 | optional — only for reading back or touch |
 
-**Backlight:** most modules already have a series resistor on `LED`; tie it to 3V3. If yours
-does not, put **100 Ω** in series or you will cook the backlight LEDs. If you want brightness
-control later, drive `LED` from GPIO 47 through a transistor — do not sink the whole backlight
-current through a GPIO (40 mA absolute max per pin, and the backlight wants more).
+The LCD uses the same SPI clock, MOSI and MISO lines as the SD card.
 
-**The touch controller** (`T_CLK`, `T_CS`, `T_DIN`, `T_DO`, `T_IRQ`) is a separate XPT2046 chip.
-Leave it disconnected — nothing uses it.
+The firmware drives the ILI9341 at up to 40 MHz.
 
-⚠️ **The firmware does not drive an ILI9341 yet.** `os.c` has an ST7789 240×240 init sequence.
-The ILI9341 needs a different init and different window maths. Wiring it up will produce a
-blank or garbled screen until that is written. Ping me when the panel lands.
+The emulator's native GBA framebuffer is 240Ã—160 and is centered on the
+320Ã—240 display.
 
 ---
 
-## 2. Buttons — 8 tactile switches
+## 2. SD card â€” SPI
 
-The easiest wiring in the whole project. Each button connects **its GPIO to GND**. Nothing
-else — no resistors. The firmware enables the chip's internal pull-ups, so the pin idles high
-and reads low when pressed.
+The SD card shares the SPI bus with the LCD.
+
+| SD signal | ESP32-S3 GPIO |
+|---|---:|
+| `CS` | 18 |
+| `MOSI` | 13 |
+| `MISO` | 9 |
+| `CLK` | 12 |
+| `VCC` | 3.3 V |
+| `GND` | GND |
+
+LCD and SD card therefore share:
+
+- `GPIO 12` â€” SPI clock
+- `GPIO 13` â€” SPI MOSI
+- `GPIO 9` â€” SPI MISO
+
+Each device has its own chip-select GPIO.
+
+---
+
+## 3. Buttons
+
+Buttons are connected between the GPIO and GND.
+
+The firmware enables the ESP32-S3 internal pull-ups, so:
+
+- released = HIGH
+- pressed = LOW
 
 | Button | GPIO |
-|---|---|
-| Up | 4 |
-| Down | 5 |
-| Left | 6 |
-| Right | 7 |
-| A | 15 |
-| B | 16 |
-| Select | 17 |
-| Start | 18 |
+|---|---:|
+| Up | 8 |
+| Down | 6 |
+| Left | 7 |
+| Right | 15 |
+| A | 47 |
+| B | 40 |
+| Select | 5 |
+| Start | 2 |
 
-A 12 mm tactile switch has 4 legs, but they are **two pairs already joined inside**. If the
-button seems permanently pressed, you picked two legs from the same pair — rotate it 90°.
+Two additional buttons are used as Game Boy Advance shoulder buttons:
 
-Run one wire from each switch to its GPIO, and daisy-chain the other side of all eight to a
-single GND wire.
+| GBA button | GPIO |
+|---|---:|
+| L | 1 |
+| R | 21 |
 
----
-
-## 3. Speaker — MAX98357A I2S amplifier
-
-**Important: the ESP32-S3 has no DAC.** The original ESP32 had analogue output on GPIO 25/26;
-Espressif removed it on the S3. Tutorials that wire a speaker straight to a GPIO are written
-for the old chip and will not work here. You need a digital (I2S) amplifier.
-
-The **MAX98357A** is the right part — it is a DAC and a 3 W class-D amplifier in one, takes
-I2S directly, and costs a few euros.
-
-| MAX98357A | ESP32-S3 |
-|---|---|
-| `VIN` | 3V3 (or 5 V for more volume) |
-| `GND` | GND |
-| `BCLK` | GPIO 40 |
-| `LRC` / `WS` | GPIO 41 |
-| `DIN` | GPIO 42 |
-| `GAIN` | leave floating (9 dB default) |
-| `SD` | leave floating (enabled) |
-
-Speaker wires to the `+` / `−` screw terminal. Use a **4 Ω or 8 Ω, 1–3 W** speaker.
-
-Do **not** connect the speaker to GND — the output is bridged (both terminals swing). Tying
-one side to ground damages the amp.
-
-⚠️ **Audio is not implemented either.** `systemOnWriteDataToSoundBuffer()` is an empty stub in
-upstream, so there is nothing to send yet. Wire it if you like, but expect silence.
+The same physical button mapping is used by the launcher/menu and the emulator.
 
 ---
 
-## 4. Battery — the part that can actually hurt you
+## 4. Button mapping summary
 
-Lithium cells store real energy. A shorted or reverse-connected LiPo can vent flame. None of
-this is exotic to get right, but it is worth getting right.
-
-**Recommended, simplest safe option: a combined charger + boost module** (sold as "5 V 1 A
-power bank module" or "TP4056 + boost"). One board handles charging, protection and stepping
-up to 5 V.
-
-```
-LiPo cell ──> [TP4056 + protection + 5V boost] ──> ESP32-S3  5V pin
-                          │                                  GND pin
-                          └── USB-C in for charging
-```
-
-Feed the module's 5 V output into the board's **5V / VIN pin**, not 3V3 — the board's own
-regulator makes the 3.3 V. Feeding 5 V into a 3V3 pin destroys the board.
-
-**Buy the TP4056 board that has protection** — it has two extra chips near the battery
-terminals (DW01A + a dual FET) and pads labelled `B+ B− OUT+ OUT−`. The bare version without
-those has no over-discharge or short protection. If your module only has `B+ B−` and `OUT+
-OUT−` is missing, it is the unprotected kind.
-
-Rules:
-
-- **Check polarity three times before the first connection.** Red = `B+`, black = `B−`.
-  Reversing it is the one mistake with no recovery.
-- Use a cell with a **JST-PH 2.0 connector** already fitted rather than soldering to bare
-  pouch tabs. Soldering directly to a cell risks internal shorts from heat.
-- **1000–2000 mAh** is plenty. Rough draw here is 100–150 mA (no Wi-Fi), plus up to ~100 mA
-  for the backlight, so ~2000 mAh gives several hours.
-- Do not charge it unattended the first few times. Charge on something non-flammable.
-- Never puncture, crush, or keep charging a cell that has swollen. A puffy cell is done —
-  dispose of it at a battery collection point.
-
-Powering from USB and battery at the same time is fine with the protected TP4056 modules; they
-handle the changeover.
+| Function | GPIO |
+|---|---:|
+| Up | 8 |
+| Down | 6 |
+| Left | 7 |
+| Right | 15 |
+| A | 47 |
+| B | 40 |
+| Select | 5 |
+| Start | 2 |
+| GBA L | 1 |
+| GBA R | 21 |
 
 ---
 
-## Suggested build order
+## 5. Audio
 
-Do these one at a time and test between each. If you wire everything and it doesn't work, you
-have eight suspects instead of one.
+Physical audio output is currently disabled in the firmware.
 
-1. **Buttons first** — cheapest, safest, and testable today. The firmware already reads them,
-   and `tools/play.py` lets me compare against injected input.
-2. **Battery** — before the screen, so you're not chasing brownouts later.
-3. **Screen** — after I've written the ILI9341 driver.
-4. **Speaker** — last, since the audio path doesn't exist yet.
+The emulator's sound-processing code remains present because parts of the
+emulation stack use it for timing, but this handheld build does not
+initialize a physical audio output device.
 
-## Pin map summary
+There is therefore no active audio GPIO pin assignment in the current
+firmware.
 
-| GPIO | Use |
-|---|---|
-| 4, 5, 6, 7 | Up, Down, Left, Right |
-| 10, 11, 12, 13, 14, 21 | LCD DC, CS, SCK, MOSI, MISO, RESET |
-| 15, 16, 17, 18 | A, B, Select, Start |
-| 40, 41, 42 | I2S BCLK, LRC, DIN |
-| 47 | spare — backlight PWM |
-| 1, 2, 8, 9, 38, 39, 48 | free (SD card would go here) |
+---
+
+## 6. Battery
+
+The current firmware does not use a battery-voltage ADC.
+
+`osBatteryMv()` returns `-1` because this hardware configuration has no
+battery-voltage measurement input defined in `config.h`.
+
+Battery charging and power regulation are therefore outside the scope of the
+firmware.
+
+---
+
+## 7. Touch controller
+
+If the ILI9341 module includes an XPT2046 or similar touch controller, it is
+not used by this firmware.
+
+No touch GPIOs are configured.
+
+---
+
+## 8. GPIOs reserved by the ESP32-S3 module
+
+Avoid using the ESP32-S3 module's internal flash/PSRAM GPIOs for external
+hardware.
+
+The firmware's active GPIO assignments are defined in:
+
+`components/esp_gba/config.h`
+
+Do not change those assignments unless the physical hardware is also changed.
+
+---
+
+## 9. Complete active pin map
+
+| GPIO | Function |
+|---:|---|
+| 1 | GBA L |
+| 2 | Start |
+| 5 | Select |
+| 6 | Down |
+| 7 | Left |
+| 8 | Up |
+| 9 | SD MISO |
+| 10 | LCD CS |
+| 11 | LCD DC |
+| 12 | Shared SPI SCK |
+| 13 | Shared SPI MOSI |
+| 14 | LCD backlight |
+| 15 | Right |
+| 18 | SD CS |
+| 21 | GBA R |
+| 40 | B |
+| 47 | A |
+
+All other GPIOs are outside the firmware's active handheld control/display
+mapping.

@@ -1,12 +1,13 @@
-# Mirror of port-esp32s3/components/gba/CMakeLists.txt with paths rebased.
+﻿# Mirror of components/gba/CMakeLists.txt with paths rebased.
 # PlatformIO scans ${PROJECT_DIR}/components, which is the repo root here, so
 # the emulator core sits two levels up instead of upstream's three.
 idf_component_register(SRCS
-    "../../src/gba.cpp"
-    "../../src/memory.cpp"
-    "../../src/sound.cpp"
-    "../../src/system.cpp"
-  INCLUDE_DIRS "." "../../src" "../../libretro" "../../libretro-common/include")
+    "gba.cpp"
+    "memory.cpp"
+    "sound.cpp"
+    "system.cpp"
+  INCLUDE_DIRS "."
+)
 
 target_compile_options(${COMPONENT_LIB} PRIVATE
     -O2

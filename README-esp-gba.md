@@ -1,13 +1,13 @@
-# esp-gba
+﻿# esp-gba
 
 [44vba](https://github.com/44670/44vba) (a `vba-next` fork) running on this ESP32-S3 board,
 built with PlatformIO instead of a system ESP-IDF install.
 
-**Just want to put it on the board? See [FLASHING.md](FLASHING.md)** —
+**Just want to put it on the board? See [FLASHING.md](FLASHING.md)** â€”
 step-by-step for Linux and Windows, including the SD card layout. The rest
 of this file is the development story.
 
-Upstream files are untouched except for one added stub (`port-esp32s3/main/config.h`).
+Upstream files are untouched except for one added stub (`components/esp_gba/config.h`).
 Everything else here is additive: `platformio.ini`, `sdkconfig.defaults`, `partitions.csv`,
 `components/gba/`, `tools/`.
 
@@ -22,7 +22,7 @@ Read off the chip with `esptool.py flash_id`:
 | Flash | 16 MB, quad per eFuse |
 | USB bridge | CH340/CH343 (`1a86:*`), enumerates as `/dev/ttyACM0` |
 
-It is **not** a genuine Espressif DevKitC-1 — that ships a CP2102N (`303a:1001`). Relevant
+It is **not** a genuine Espressif DevKitC-1 â€” that ships a CP2102N (`303a:1001`). Relevant
 because PlatformIO's `esp32-s3-devkitc-1` board manifest makes assumptions that do not hold
 here (see "Flash mode" below).
 
@@ -30,14 +30,14 @@ here (see "Flash mode" below).
 
 ### 1. `config.h` is missing from upstream
 
-`port-esp32s3/main/{main.cpp,os.c}` both `#include "config.h"`, but no such file exists in
-the repo — the `.gitignore` swallows it. **`port-esp32s3` does not compile as published.**
-Neither file references anything from it, so `port-esp32s3/main/config.h` is an empty stub.
+`components/esp_gba/{main.cpp,os.c}` both `#include "config.h"`, but no such file exists in
+the repo â€” the `.gitignore` swallows it. **the original port did not compile as published without restoring its ignored config.h.**
+Neither file references anything from it, so `components/esp_gba/config.h` is an empty stub.
 
 ### 2. Flash mode must be DIO, not QIO
 
 This one costs an afternoon if you don't spot it. PlatformIO's `esp32-s3-devkitc-1` manifest
-hardcodes `"flash_mode": "qio"`, and that is stamped into the image header — it **overrides**
+hardcodes `"flash_mode": "qio"`, and that is stamped into the image header â€” it **overrides**
 `CONFIG_ESPTOOLPY_FLASHMODE_*` in sdkconfig, so changing sdkconfig alone does nothing.
 (`esptool` even warns: *"Image file at 0x0 is protected with a hash checksum, so not changing
 the flash mode setting."*)
@@ -51,7 +51,7 @@ ets_loader.c 78
 rst:0x10 (RTCWDT_RTC_RST)      <-- alternating with TG0WDT_SYS_RST
 ```
 
-Note it never reaches `entry`, and no 2nd-stage bootloader banner is printed — which is how
+Note it never reaches `entry`, and no 2nd-stage bootloader banner is printed â€” which is how
 you know it is *not* a PSRAM problem. PSRAM init happens much later.
 
 The fix is in `platformio.ini`, not `sdkconfig.defaults`:
@@ -62,7 +62,7 @@ board_build.flash_mode = dio
 
 A healthy boot loads three segments and prints `entry`.
 
-### 3. `emuInit()` was missing the per-game overrides — black screen
+### 3. `emuInit()` was missing the per-game overrides â€” black screen
 
 Upstream's ESP32 `emuInit()` is only:
 
@@ -70,18 +70,18 @@ Upstream's ESP32 `emuInit()` is only:
 CPUSetupBuffers(); CPUInit(NULL, false); CPUReset(); SetFrameskip(0x1);
 ```
 
-`port-sdl2/main.cpp` — the port that actually works — additionally calls
+The ESP32-S3 emuInit() additionally calls
 `load_image_preferences()`, `soundReset()`, `rtcEnable(true)` and `flashSetSize()`, and seeds
 `cpuSaveType`/`flashSize`/`enableRtc`/`mirroringEnable` first. `load_image_preferences()` lives
 in `libretro/libretro.cpp`, which the ESP32 port does not compile, so **none of it ran**.
 
-Pokémon Gen 3 probes its save chip and RTC during boot. Without those settings Ruby hangs
+PokÃ©mon Gen 3 probes its save chip and RTC during boot. Without those settings Ruby hangs
 before initialising the display: the emulator runs at full speed and renders pure black
-forever. The tell is `DISPCNT=0x0080` — bit 7 is forced blank — with `pix_nonzero=0`.
+forever. The tell is `DISPCNT=0x0080` â€” bit 7 is forced blank â€” with `pix_nonzero=0`.
 Once fixed, `DISPCNT` becomes `0x1f40` (BG0-3 + OBJ enabled) and pixels appear.
 
 `gbaover[]` + `load_image_preferences()` are extracted verbatim into
-`port-esp32s3/main/gbaover.cpp` (from `libretro.cpp` lines 226-424) rather than linking
+`components/esp_gba/gbaover.cpp` (from `libretro.cpp` lines 226-424) rather than linking
 `libretro.cpp`, which would drag in the whole libretro frontend API. For Ruby (Japan) the
 table gives `flashSize=131072, saveType=0, rtcEnabled=1, mirroringEnabled=0`.
 
@@ -94,7 +94,7 @@ factory  app  0x010000   4M
 rom      0x40 0x410000  11M
 ```
 
-The ROM is not a filesystem — it is `esp_partition_mmap`'d straight into the address space
+The ROM is not a filesystem â€” it is `esp_partition_mmap`'d straight into the address space
 (`main.cpp`), so **the whole cart must fit in the `rom` partition**. Flash a ROM with:
 
 ```bash
@@ -132,7 +132,7 @@ the `SPI_FLASH_MMAP_DATA` enum, and moved per-target `CONFIG_ESP32S3_SPIRAM_SUPP
 
 > **Superseded.** Sparse packing now aliases identical padding pages (all
 > 0xFF and all 0x00) into shared slots, so what must fit is a cart's
-> *distinct* pages — every 16 MB cart tested except Fire Emblem (US) fits.
+> *distinct* pages â€” every 16 MB cart tested except Fire Emblem (US) fits.
 > The section below records the earlier flat-mapping era.
 
 | ROM | Size | Fits in 11 MB `rom` partition? |
@@ -141,20 +141,20 @@ the `SPI_FLASH_MMAP_DATA` enum, and moved per-target `CONFIG_ESP32S3_SPIRAM_SUPP
 | Pocket Monsters - Emerald (Japan) `BPEJ` | 16.00 MB | **no** |
 | Pocket Monsters - FireRed (Japan) `BPRJ` | 16.00 MB | **no** |
 
-The Japanese Gen 3 releases are not all the same size — Ruby is 8 MB while Emerald and
+The Japanese Gen 3 releases are not all the same size â€” Ruby is 8 MB while Emerald and
 FireRed are full 16 MB carts. Trimming trailing `0xFF` padding does not rescue the 16 MB ones
 (real data ends at 15.25 MB and 15.87 MB respectively).
 
-**No partition layout can fit a 16 MB ROM on 16 MB of flash**: 16.00 − 0.06 (bootloader/nvs/phy)
-− app leaves at most 13.94 MB with a 2 MB app, or 14.94 MB with a 1 MB app. Running those carts
+**No partition layout can fit a 16 MB ROM on 16 MB of flash**: 16.00 âˆ’ 0.06 (bootloader/nvs/phy)
+âˆ’ app leaves at most 13.94 MB with a 2 MB app, or 14.94 MB with a 1 MB app. Running those carts
 requires replacing the `esp_partition_mmap` path with a demand-paged SD reader backed by a
-PSRAM cache — which upstream does not implement.
+PSRAM cache â€” which upstream does not implement.
 
 ## Optimisation
 
 Benchmark: `tools/bench.py` resets the board and averages over a fixed window. From reset with
 no input the Ruby attract mode is deterministic, so the same wall-clock window covers the same
-workload on every build — scene complexity varies enormously (a fade is far cheaper than the
+workload on every build â€” scene complexity varies enormously (a fade is far cheaper than the
 scrolling forest), so a free-running average is not comparable between runs.
 
 **Measure emulated time from audio sample count, not from a frame callback.** The first version
@@ -165,14 +165,14 @@ regardless of frameskip, which is impossible if the callback were once per frame
 
 Results at frameskip 1, drawn fps (directly measured both before and after):
 
-| Change | drawn fps | Δ |
+| Change | drawn fps | Î” |
 |---|---|---|
-| Baseline (upstream settings) | 13.0 | — |
-| PSRAM 40 → 80 MHz | 13.4 | +3% |
+| Baseline (upstream settings) | 13.0 | â€” |
+| PSRAM 40 â†’ 80 MHz | 13.4 | +3% |
 | Assertions disabled | 13.4 | 0% |
-| `-O2` → `-O3` | 13.1 | **−2%**, reverted |
+| `-O2` â†’ `-O3` | 13.1 | **âˆ’2%**, reverted |
 | **Async DMA framebuffer blit** | 16.6 | **+24%** |
-| `vram` → internal SRAM | — | no-op, allocation failed |
+| `vram` â†’ internal SRAM | â€” | no-op, allocation failed |
 | QIO flash (app only) | 17.0 | +3% |
 | 32-bit byteswap loop | 17.0 | 0% |
 | 64-byte data cache line | 17.2 | +1% |
@@ -183,8 +183,8 @@ What actually mattered was one thing: **the blocking SPI blit**. Upstream called
 out at 60MHz. Queuing it and reclaiming the transfer at the top of the next frame recovers
 essentially all of that, and still works with a real panel attached.
 
-Everything aimed at memory bandwidth — faster PSRAM, QIO flash, bigger cache lines, moving hot
-buffers to internal SRAM — bought a few percent each. The emulator is CPU-bound in the ARM
+Everything aimed at memory bandwidth â€” faster PSRAM, QIO flash, bigger cache lines, moving hot
+buffers to internal SRAM â€” bought a few percent each. The emulator is CPU-bound in the ARM
 interpreter, not starved for bandwidth. `-O3` was actively worse: bigger code, more instruction
 cache pressure.
 
@@ -195,8 +195,8 @@ Two things worth knowing for future attempts:
   `FB` alone is 76800 bytes of static internal. The code tries internal first and falls back.
 - **QIO needs the bootloader left on DIO.** The ROM loader cannot read QIO on this board
   (the flash's Quad Enable bit is not set that early), but the IDF bootloader sets QE and can
-  then read the app in QIO — `qio_mode: Enabling default flash chip QIO` in the boot log.
-  `tools/flash_qio.sh` builds everything QIO and patches only the bootloader image back to DIO,
+  then read the app in QIO â€” `qio_mode: Enabling default flash chip QIO` in the boot log.
+  `tools/flash_qio.py` builds everything QIO and patches only the bootloader image back to DIO,
   recomputing its SHA256. **Use that script, not `pio run -t upload`**, which would flash a QIO
   bootloader and boot-loop.
 
@@ -211,14 +211,14 @@ Runtime-tunable over the control channel (`tools/bench.py <label> <warmup> <wind
 | 2 | 21.0 | 35% |
 | 3 | 23.0 | 38% |
 
-Note `emulated fps ≈ drawn fps` at every setting, so frameskip here reduces per-frame rendering
+Note `emulated fps â‰ˆ drawn fps` at every setting, so frameskip here reduces per-frame rendering
 work rather than reducing how often the framebuffer is blitted. **This measures throughput, not
-perceived smoothness** — higher settings repeat rendered content, and how bad that looks has not
+perceived smoothness** â€” higher settings repeat rendered content, and how bad that looks has not
 been assessed. The default stays at 1, which is what the captured video shows.
 
 ## Measured performance
 
-Pokémon Ruby (Japan), frameskip 1, PSRAM at 40 MHz, 240 MHz CPU:
+PokÃ©mon Ruby (Japan), frameskip 1, PSRAM at 40 MHz, 240 MHz CPU:
 
 | State | drawn fps |
 |---|---|
@@ -227,101 +227,104 @@ Pokémon Ruby (Japan), frameskip 1, PSRAM at 40 MHz, 240 MHz CPU:
 | Gameplay, optimised (frameskip 1) | **17.0** |
 | Gameplay, optimised (frameskip 3) | 22.5 |
 
-Upstream's README claims 20 fps on an N8R8 but does not say what was on screen — and as the
+Upstream's README claims 20 fps on an N8R8 but does not say what was on screen â€” and as the
 first row shows, a blank screen more than doubles the number, so the two figures may not be
 comparable.
 
 Measured with no panel attached. The SPI writes still execute and cost real time, so wiring a
 display should not change this much, but it is not zero-risk.
 
-Still short of the 59.72 fps the GBA runs at — roughly 29% of full speed at the default
+Still short of the 59.72 fps the GBA runs at â€” roughly 29% of full speed at the default
 frameskip. Closing that gap needs the ARM interpreter itself to get cheaper (IRAM placement of
 the hot dispatch path, or a dynarec), not more memory bandwidth.
 
-## Not done yet
+## Current hardware
 
-- **No display.** `os.c` drives a 240x240 ST7789 on GPIO 10/11/12/13/14 + reset 21. The panel
-  on order is an ILI9341 320x240, which needs a different init sequence and a new window/offset
-  calculation. Nothing has been written for it.
-- **No input.** `os.h` expects 8 buttons on GPIO 0/8/18/38/39/45/46/48. Careful: GPIO 0, 45 and
-  46 are strapping pins on the S3 — holding those buttons at reset will change boot mode.
-- **No audio *output*.** The core does generate sound — upstream just discarded it in an empty
-  `systemOnWriteDataToSoundBuffer()`. That callback is now implemented and the samples are
-  captured over UART (see Recording), which confirms the audio path works end to end: the rate
-  derived from sample counts lands within 0.3% of the 47782 Hz passed to `soundSetSampleRate()`.
-  What is missing is a hardware sink. The ESP32-S3 has **no DAC** (unlike the original ESP32),
-  so playback needs an I2S amp such as a MAX98357A — see WIRING.md.
-- **No save persistence.** `libretro_save_buf` is allocated but never written to flash or SD,
-  so in-game saves are lost on reset.
+This port targets one fixed ESP32-S3 handheld configuration.
 
-## Bringing up an unfamiliar board (headless mode)
+### Display
 
-```bash
-rm -rf .pio/build/esp32s3        # required: cmake only re-reads the env var on reconfigure
-ESP_GBA_HEADLESS=1 ./tools/flash_qio.sh
-```
+The handheld uses a **320Ã—240 ILI9341 SPI display**.
 
-`HEADLESS` skips `lcdInit()` and all GPIO setup, so the firmware drives **no pins at all**. Use
-it on any board whose pinout you do not know: this port's ST7789 pins (GPIO 10/11/12/13/14/21)
-will be wired to something else there, and clocking them can buzz an onboard amplifier or
-contend with another chip's outputs.
+The display is driven from the same SPI bus used by the SD card:
 
-It also skips `osSerialInit()`. That matters on boards whose USB is the S3's **native**
-USB-Serial/JTAG rather than a UART bridge: `esp_vfs_dev_uart_use_driver()` redirects stdout to
-physical UART0 on GPIO 43/44, which on such a board goes nowhere, and every subsequent print
-vanishes. Leaving stdout on the default console keeps the log visible over USB.
+| Signal | GPIO |
+|---|---:|
+| LCD CS | 10 |
+| LCD DC | 11 |
+| SPI SCK | 12 |
+| SPI MOSI | 13 |
+| SPI MISO | 9 |
+| Backlight | 14 |
 
-**The serial control channel does not work in headless mode** — key injection and framebuffer
-dumps are bound to `UART_NUM_0`. Screenshots and `record.py` need a UART-bridge board, or a port
-of the channel to the `usb_serial_jtag` driver.
+LCD readback is disabled in the normal firmware path. The panel reset is tied
+to the ESP32-S3 reset line.
 
-### Freenove FNK0104AB (2.8" ILI9341)
+The GBA framebuffer is 240Ã—160 and is centered on the 320Ã—240 LCD.
+
+### Buttons
+
+The physical button layout is:
+
+| Button | GPIO |
+|---|---:|
+| Up | 8 |
+| Down | 6 |
+| Left | 7 |
+| Right | 15 |
+| A | 47 |
+| B | 40 |
+| Select | 5 |
+| Start | 2 |
+| GBA L | 1 |
+| GBA R | 21 |
+
+Buttons are active-low and use the ESP32-S3 internal pull-ups.
+
+### SD card
+
+The SD card shares SPI clock, MOSI and MISO with the LCD.
+
+| Signal | GPIO |
+|---|---:|
+| SD CS | 18 |
+| SPI SCK | 12 |
+| SPI MOSI | 13 |
+| SPI MISO | 9 |
+
+### Audio
+
+Physical audio output is disabled in this handheld firmware.
+
+The emulator sound-processing code remains present because it is part of the
+emulation/timing path, but no physical audio output device is initialized.
+
+### Battery
+
+This hardware configuration has no battery-voltage ADC.
+
+`osBatteryMv()` therefore returns `-1`; the firmware does not report battery
+voltage.
+
+### Saves
+
+Game saves and emulator save states are supported by the current firmware.
+
+See `WIRING.md` for the complete hardware reference.
+
+## Headless build
+
+A headless build is available for emulator/core testing without touching the
+display or GPIO hardware.
 
 ```bash
 rm -rf .pio/build/esp32s3
-ESP_GBA_BOARD=FNK0104AB ./tools/flash_qio.sh
+ESP_GBA_HEADLESS=1 pio run
 ```
 
-Pin map from the vendor's own TFT_eSPI setup header
-(`Libraries/FNK0104AB/TFT_eSPI_Setups_v1.3.zip` → `FNK0104AB_2.8_240x320_ILI9341.h`
-in [Freenove/Freenove_ESP32_S3_Display](https://github.com/Freenove/Freenove_ESP32_S3_Display)),
-not guessed:
+## Display bring-up notes
 
-| Signal | GPIO | Upstream ST7789 build used |
-|---|---|---|
-| SCLK | 12 | 12 |
-| MOSI | 11 | 13 |
-| MISO | 13 | 14 |
-| CS | 10 | 11 |
-| DC | 46 | 10 |
-| RST | tied to board reset | 21 |
-| Backlight | 45 (HIGH = on) | not driven |
-
-Panel is 240x320 native, driven rotated to 320x240 landscape (MADCTL `0x28` = MV|BGR) with
-`INVON`, per the vendor setup's `TFT_RGB_ORDER TFT_BGR` and `TFT_INVERSION_ON`. The 240x160 GBA
-frame is centred, leaving a 40px border all round. SPI at 40 MHz, the vendor's figure.
-
-**Pins this board uses that the generic build would have trampled:**
-
-```
-ES8311 codec  I2S : MCK 17, BCK 18, DIN 16, DOUT 15, WS 21, amp enable 1
-ES8311 codec  I2C : SCL 39, SDA 38
-SDMMC             : CLK 5, CMD 4, D0 6, D1 7, D2 2, D3 3
-```
-
-Upstream's `PIN_SYS_RSTN` was **21 — the codec's word-select line** — and `lcdInit()` drives it
-low for 500 ms at every boot. The remapped button pins (4,5,6,7,15,16,17,18) land squarely on
-the SD card and I2S lines. Hence `PIN_KEY_*` are all `-1` in the FNK0104AB block: this board has
-no discrete buttons, and defining them would fight the onboard peripherals.
-
-**The serial control channel does not work on this board.** Console *output* reaches USB via
-`CONFIG_ESP_CONSOLE_SECONDARY_USB_SERIAL_JTAG`, but input is read from `UART_NUM_0` on GPIO
-43/44, which the native-USB port does not reach. Screenshots, key injection and `record.py` all
-need a port to the `usb_serial_jtag` driver.
-
-### Two display bugs that cost an evening
-
-Both were self-inflicted, and both were invisible to every check that existed at the time —
+Both were self-inflicted, and both were invisible to every check that existed at the time â€”
 the build passed, the benchmark improved, and the UART screenshots were pixel-perfect, because
 **the framebuffer was always correct and only what reached the panel was wrong**. Neither board
 had a working screen when the code was written.
@@ -329,7 +332,7 @@ had a working screen when the code was written.
 **1. Transactions over 32768 bytes are silently truncated.** `SPI_LL_DATA_MAX_BIT_LEN` is
 `1 << 18` bits on the ESP32-S3. `spi_master.c` only validates a transaction against
 `max_transfer_sz`, never against the hardware limit, so a 76800-byte frame returns `ESP_OK` and
-delivers 32768 bytes — the top 68 of 160 rows. Upstream's 28800-byte chunking was already under
+delivers 32768 bytes â€” the top 68 of 160 rows. Upstream's 28800-byte chunking was already under
 the limit; collapsing it into one transfer for speed reintroduced the bug.
 
 **2. CS must stay LOW across a command and its data.** This panel discards the operation if CS
@@ -337,13 +340,13 @@ rises between `0x2C` and the pixel data. Upstream raised CS after every transfer
 ST7789 tolerated; this ILI9341 does not. `lcdCsLow()`/`lcdCsHigh()` are nested so
 `lcdSetWindow()` can be called inside a blit without releasing CS.
 
-The give-away was that `lcdReadReg()` worked perfectly while everything else failed — it is the
+The give-away was that `lcdReadReg()` worked perfectly while everything else failed â€” it is the
 one function that puts command and data in a *single* transaction.
 
 ### Verifying the panel without looking at it
 
 Register reads on this board are trustworthy, which makes the display self-checking. Don't
-assume — prove it first, by writing two different values and confirming the readback tracks:
+assume â€” prove it first, by writing two different values and confirming the readback tracks:
 
 ```
 read check: wrote 28 -> 28, wrote 48 -> 48  => reads TRUSTWORTHY
@@ -368,23 +371,23 @@ panel probe @(140,120): 0/8 non-black   DISPCNT=0140   <- game still booting
 panel probe @(140,120): 8/8 non-black, first px 103800  DISPCNT=1f40   <- forest intro
 ```
 
-Note `ID4` reads `00 00 00` on this board even though other reads are reliable — the controller
+Note `ID4` reads `00 00 00` on this board even though other reads are reliable â€” the controller
 is likely a clone that does not implement `0xD3`. It cannot be used to identify the panel.
 
 ### Second optimisation round (on the panel)
 
 | Attempt | Result |
 |---|---|
-| Async blit restored, CS held low across the frame | **14.6 → 18.8 fps (+29%)** |
-| SPI 40 → 60 MHz | no change; kept (less bus time, verified on panel) |
-| `vram` → internal SRAM, `FB` → PSRAM | **failed**, see below |
+| Async blit restored, CS held low across the frame | **14.6 â†’ 18.8 fps (+29%)** |
+| SPI 40 â†’ 60 MHz | no change; kept (less bus time, verified on panel) |
+| `vram` â†’ internal SRAM, `FB` â†’ PSRAM | **failed**, see below |
 | `CONFIG_ESP32S3_*_CACHE_WRAP` | **does not link** on IDF 4.4 with octal PSRAM |
 
 Only the first helped. Everything else was flat or impossible, and the remaining headroom is in
 the ARM interpreter itself, not the display path.
 
 **`spi_device_queue_trans()` with a PSRAM source hangs.** The transaction never completes and
-`lcdWaitFB()` blocks forever on `spi_device_get_trans_result()`. So `FB` must be internal — and
+`lcdWaitFB()` blocks forever on `spi_device_get_trans_result()`. So `FB` must be internal â€” and
 since internal SRAM has only ~161KB contiguous at `app_main` entry, `vram` (131072) and `FB`
 (76800) cannot both be internal. `FB` wins because the async blit depends on it.
 
@@ -393,7 +396,7 @@ after `osInit()` (SPI DMA descriptors, UART driver) the largest is ~90KB.
 
 **`CONFIG_ESP32S3_INSTRUCTION_CACHE_WRAP` / `DATA_CACHE_WRAP`** fail at link with
 `undefined reference to psram_support_wrap_size`. Note this fails at *link*, so a stale binary
-stays on the board and the next benchmark silently measures the old firmware — always confirm
+stays on the board and the next benchmark silently measures the old firmware â€” always confirm
 the flash actually wrote (`Hash of data verified` x3) before trusting a number.
 
 ### Cost of the fix

@@ -10,10 +10,10 @@ NEVER use `pio run -t upload`: it flashes the unpatched QIO bootloader and
 the board boot-loops until rescued.
 
 Usage:
-    python tools/flash_qio.py [--port COM5 | --port /dev/ttyACM0] [--board X]
+    python tools/flash_qio.py [--port COM5 | --port /dev/ttyACM0]
 
-The port is auto-detected when omitted (esptool probes). The board defaults
-to FNK0104AB, the Freenove FNK0104 this project targets.
+The port is auto-detected when omitted (esptool probes).
+This project targets the ESP32-S3 handheld hardware defined in config.h.
 """
 import argparse
 import os
@@ -35,14 +35,10 @@ def run(cmd, env=None):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--port", default=os.environ.get("PORT"),
-                    help="serial port (COM5, /dev/ttyACM0); auto-detect if omitted")
-    ap.add_argument("--board", default=os.environ.get("ESP_GBA_BOARD",
-                                                      "FNK0104AB"),
-                    help="board variant (default FNK0104AB)")
+         help="serial port (COM5, /dev/ttyACM0); auto-detect if omitted")
     args = ap.parse_args()
 
     env = dict(os.environ)
-    env["ESP_GBA_BOARD"] = args.board
 
     run(["pio", "run", "-e", "esp32s3"], env=env)
 

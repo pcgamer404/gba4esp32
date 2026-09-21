@@ -1,4 +1,4 @@
-# Derived from upstream port-esp32s3/sdkconfig, adjusted for this board.
+﻿# Derived from upstream the earlier ESP32-S3 sdkconfig, adjusted for this board.
 # Upstream targeted an 8MB-flash N8R8; this board has 16MB flash.
 
 CONFIG_IDF_TARGET="esp32s3"

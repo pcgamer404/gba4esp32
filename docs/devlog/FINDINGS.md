@@ -1,8 +1,13 @@
-# Findings — dynarec investigation and where the real speed is
+﻿# Findings â€” dynarec investigation and performance
 
-Companion to `SESSION.md`. Everything here was measured on the actual
-FNK0104AB board unless marked otherwise.
+Companion to `SESSION.md`.
 
+**Historical engineering log:** many measurements in this file were made on
+the earlier Freenove FNK0104AB hardware. They are retained as development
+history and should not be treated as the current handheld hardware reference.
+
+For the current ESP32-S3 handheld pinout and hardware configuration, see
+`WIRING.md` and `components/esp_gba/config.h`.
 ---
 
 ## 0. Corrections from the 2026-08-19 session (measured, not assumed)
@@ -38,7 +43,7 @@ FNK0104AB board unless marked otherwise.
 
 Repo: `44670/gpsp-reload`, cloned at `/home/charles/Programmation/C/gpsp-reload/`.
 
-**Measured on our board, Pokémon Ruby, same harness:**
+**Measured on our board, PokÃ©mon Ruby, same harness:**
 
 | backend | emulated fps | % full speed |
 |---|---:|---:|
@@ -47,10 +52,10 @@ Repo: `44670/gpsp-reload`, cloned at `/home/charles/Programmation/C/gpsp-reload/
 
 **dhrystone:** interpreter 50.0 fps, dynarec 9.1 fps.
 
-The dynarec is **4–5× slower than the interpreter**, consistently, on both a
+The dynarec is **4â€“5Ã— slower than the interpreter**, consistently, on both a
 real 8 MB game and a synthetic benchmark.
 
-### Why — from their own `LESSONS.md`
+### Why â€” from their own `LESSONS.md`
 
 > "Current ESP32-S3 JIT is a correctness scaffold: emitted Xtensa blocks enter
 > backend-local ARM/Thumb helpers, not full native ARM-to-Xtensa lowering yet."
@@ -72,13 +77,13 @@ Worth recording so nobody re-tests it:
 
 - Host codegen tests **PASS**; emitted stream starts `36 41 00` = `ENTRY a1, 32`
 - QEMU ARM ROM: `result=PASS`, `interp_blocks=0 generic_fallbacks=0 unsupported=0`
-- QEMU Thumb ROM: **PASS**, `thumb_blocks=10014576` (Pokémon is Thumb-heavy)
+- QEMU Thumb ROM: **PASS**, `thumb_blocks=10014576` (PokÃ©mon is Thumb-heavy)
 
 Correctness was never the problem.
 
 ---
 
-## 2. `esp32s31/` is a DIFFERENT CHIP — its 62 FPS does not apply to us
+## 2. `esp32s31/` is a DIFFERENT CHIP â€” its 62 FPS does not apply to us
 
 `gpsp-reload/esp32s31/sdkconfig.defaults` line 2:
 
@@ -87,12 +92,12 @@ CONFIG_IDF_TARGET="esp32s31"
 ```
 
 Not ESP32-S3. It is a RISC-V part: **RV32IM native dynarec**, 320 MHz CPU,
-250 MHz PSRAM, `fence.i`, an **RWX PSRAM aperture**, and an 800×480 **RGB**
+250 MHz PSRAM, `fence.i`, an **RWX PSRAM aperture**, and an 800Ã—480 **RGB**
 panel. Stock ESP-IDF cannot even build it.
 
 Consequences:
 
-- Their **62.5–66.1 FPS** result is on that board. Unreachable here.
+- Their **62.5â€“66.1 FPS** result is on that board. Unreachable here.
 - Their `korvo1_*` drivers (RGB panel, different SDMMC pins, USB XInput) do
   **not** port to our SPI ILI9341 board.
 - The RWX PSRAM aperture is *why* their JIT works. The ESP32-S3 has no
@@ -106,17 +111,17 @@ Consequences:
 
 From `esp32s31/README.md`. Measured by repeated hard-reset A/B runs. Times are
 **per emulated frame**; negative = faster. Their frame budget is ~16 ms, ours is
-~42 ms, so percentages here are smaller for us — but the *ranking* should hold.
+~42 ms, so percentages here are smaller for us â€” but the *ranking* should hold.
 
 | Placement | Cost | Effect | Their default |
 |---|---:|---:|---|
-| **ARM interpreter loop (`execute_arm`) in SRAM** | 63,172 B | **−1.4 to −1.9 ms** | SRAM |
-| Shared render buffer in SRAM | 77,280 B | −0.50 to −0.55 ms | SRAM |
-| Common RGB565 tile-renderer paths in SRAM | 5,376 B | −0.10 to −0.13 ms | SRAM |
-| LCD bounce strips 2→8 rows | +57,600 B | −0.27 ms | SRAM |
-| GBA IWRAM in SRAM | 32,768 B | −0.03 to −0.08 ms | SRAM |
-| Sound ring PSRAM→SRAM | 8,192 B | −0.02 to −0.03 ms | SRAM |
-| GBA VRAM in SRAM | 98,304 B | −0.10 ms | **PSRAM** (not worth it) |
+| **ARM interpreter loop (`execute_arm`) in SRAM** | 63,172 B | **âˆ’1.4 to âˆ’1.9 ms** | SRAM |
+| Shared render buffer in SRAM | 77,280 B | âˆ’0.50 to âˆ’0.55 ms | SRAM |
+| Common RGB565 tile-renderer paths in SRAM | 5,376 B | âˆ’0.10 to âˆ’0.13 ms | SRAM |
+| LCD bounce strips 2â†’8 rows | +57,600 B | âˆ’0.27 ms | SRAM |
+| GBA IWRAM in SRAM | 32,768 B | âˆ’0.03 to âˆ’0.08 ms | SRAM |
+| Sound ring PSRAMâ†’SRAM | 8,192 B | âˆ’0.02 to âˆ’0.03 ms | SRAM |
+| GBA VRAM in SRAM | 98,304 B | âˆ’0.10 ms | **PSRAM** (not worth it) |
 | Interpreter read map in SRAM | 32,768 B | no gain | PSRAM |
 | **One promoted ROM instruction page in SRAM** | 32,768 B | **+0.16 to +0.30 ms REGRESSION** | rejected |
 | Profile-selected small helpers | 4,560 B | +0.35 ms REGRESSION | PSRAM |
@@ -124,10 +129,10 @@ From `esp32s31/README.md`. Measured by repeated hard-reset A/B runs. Times are
 Two counter-intuitive results worth keeping:
 
 - **Promoting a hot ROM page to SRAM makes things WORSE.** Keeping ROM in the
-  PSRAM paging window is faster — its separate memory path avoids adding
+  PSRAM paging window is faster â€” its separate memory path avoids adding
   contention to the SRAM already shared by CPU, renderer, and LCD DMA.
-- **LTO measured NEGATIVE** (`retro_run` 15.294 → 15.426 ms, +0.87%) and is off
-  by default in their release build. Matches our own `-O3` result (−2%).
+- **LTO measured NEGATIVE** (`retro_run` 15.294 â†’ 15.426 ms, +0.87%) and is off
+  by default in their release build. Matches our own `-O3` result (âˆ’2%).
 
 ---
 
@@ -139,16 +144,16 @@ Two counter-intuitive results worth keeping:
 > cannot live in IRAM. Only a dynamic recompiler closes a 3-5x gap."
 
 **The reasoning is wrong.** It treats IRAM placement as all-or-nothing. You do
-not need the whole 336 KB interpreter in SRAM — you need the **hot loop**.
-Their table shows `execute_arm` alone is **63 KB** and worth **−1.4 to −1.9
+not need the whole 336 KB interpreter in SRAM â€” you need the **hot loop**.
+Their table shows `execute_arm` alone is **63 KB** and worth **âˆ’1.4 to âˆ’1.9
 ms/frame**, the single largest win they measured.
 
 We have never tried selective `IRAM_ATTR` placement of the hot interpreter loop
 and the hot RGB565 renderer paths. This applies to **our current vba-next build**
 regardless of any core swap, and is the highest value/effort item outstanding.
 
-Rough scale on our board: at 23.7 fps the frame is 42.2 ms, so −1.9 ms is ≈ +5%.
-Combined with the render-buffer and tile-renderer placements, plausibly +10–15%.
+Rough scale on our board: at 23.7 fps the frame is 42.2 ms, so âˆ’1.9 ms is â‰ˆ +5%.
+Combined with the render-buffer and tile-renderer placements, plausibly +10â€“15%.
 Real, but not a path to 60 fps on its own.
 
 ---
@@ -157,12 +162,12 @@ Real, but not a path to 60 fps on its own.
 
 **Do not act on the "gpSP interpreter is 27% faster" claim. It is unverified.**
 
-- gpSP's 23.7 fps was measured **headless** (`GPSP_CORES3SE_LCD=0`) — no display
+- gpSP's 23.7 fps was measured **headless** (`GPSP_CORES3SE_LCD=0`) â€” no display
   cost at all.
 - Our 18.6 fps for Ruby in `SESSION.md` is **drawn** fps, **with** the SPI blit.
 
 Those are different metrics on different workloads. Our async DMA blit was worth
-+29% when introduced, so the display costs real time — the true core-vs-core gap
++29% when introduced, so the display costs real time â€” the true core-vs-core gap
 could be much smaller, zero, or negative.
 
 Our firmware already logs **both** numbers:
@@ -171,25 +176,25 @@ Our firmware already logs **both** numbers:
 BENCH t=<s>s emu=<emulated fps> draw=<drawn fps> DISPCNT=<x>
 ```
 
-**The missing measurement is our `emu` figure for Ruby.** If it is ≈23, gpSP has
+**The missing measurement is our `emu` figure for Ruby.** If it is â‰ˆ23, gpSP has
 no advantage and the whole port is pointless. Get that number before any port
 work.
 
 ---
 
-## 6. Board / workflow facts learned this session
+## 6. Historical board / workflow facts
 
 ### Serial ROM pick (new, committed to our tree)
 
-The menu was touch/BOOT only, so no host script could choose a game — which made
+The menu was touch/BOOT only, so no host script could choose a game â€” which made
 reproducible benchmarking impossible. Added:
 
 - `OS_CMD_PICK 0x05` + 1 byte ROM index (`os.h`)
 - `serialPick` / `osTakeSerialPick()` (`os.c`)
 - pick handling in the menu loop (`menu.cpp`)
-- **`osSerialInit()` moved before the menu** in `main.cpp` — it used to run after,
+- **`osSerialInit()` moved before the menu** in `main.cpp` â€” it used to run after,
   so `uart_read_bytes()` would have failed in the menu
-- `tools/bench_pick.py` — reset, pick by index, wait for boot, report emu+draw
+- `tools/bench_pick.py` â€” reset, pick by index, wait for boot, report emu+draw
 
 Send: `A5 05 <index>`, repeatedly, on a timer. Boot chatter means the port is
 rarely idle, so do **not** gate sending on "no data received".
@@ -197,8 +202,8 @@ rarely idle, so do **not** gate sending on "no data received".
 ### ROM flash writes are the main time sink
 
 - `/sd/packed/<name>.pak` + `.map` cache works and **is** used
-  (`MENU: using packed cache ...`), but it only skips the *scan* — the flash
-  **write** still happens, and that is most of the 2–4 minutes.
+  (`MENU: using packed cache ...`), but it only skips the *scan* â€” the flash
+  **write** still happens, and that is most of the 2â€“4 minutes.
 - NVS records which game is in flash. Re-picking the **same** game skips
   everything and boots instantly. So each game costs one write, ever.
 - The gpsp-reload detour clobbered our `rom` partition (its `gamepak` lives at a
@@ -211,35 +216,36 @@ rarely idle, so do **not** gate sending on "no data received".
 ### Serial gotchas
 
 - `pyserial` is **not** in system python. Use `~/.platformio/penv/bin/python`.
-- Opening the port toggles DTR/RTS and **resets the board** — this aborts an
+- Opening the port toggles DTR/RTS and **resets the board** â€” this aborts an
   in-progress ROM flash write. Do not reconnect while one is running.
 - Menu auto-starts after `MENU_AUTOSTART_MS` (12 s) on the first ROM that *fits*,
   which is **Emerald**, not Ruby. Always send an explicit pick.
 
-### Current board state
+### Historical board state (2026-08-19)
 
 Restored to our esp-gba firmware and working: LCD up, SD mounted (`Viper
 28856MB, 4-bit`), 3 ROMs listed, ES8311 + FT6336 both present on I2C
-(`0x18 0x38`). Emerald was mid flash-write when work stopped — it may need to
+(`0x18 0x38`). Emerald was mid flash-write when work stopped â€” it may need to
 finish or redo that write on next boot.
 
 ---
 
-## 7. Still open
+## 7. Historical open items
 
-- **Audio silent.** Boot plays the same 440 Hz tone at `AUDIO_EN` HIGH (tone A)
-  then LOW (tone B). *Nobody has yet reported which one is audible* — that single
-  answer settles whether the SC8002B `SHUTDOWN` is active high or low. Codec
-  configures fine and I2S drains (`43264 of 43200 frames sent`).
-- **Touch calibration never run** (three crosshairs at boot, skips after 8 s).
-- **Our `emu` fps for Ruby** — see §5. Blocks any core-swap decision.
-- **Selective `IRAM_ATTR` on the hot interpreter loop** — see §4. Best known
-  remaining optimization, applies to the current build.
+The following items were open during the earlier hardware investigation. They
+are retained as development history and are not current hardware requirements.
+
+- The old Freenove hardware's physical audio path and touch controller had
+  unresolved work at this stage of the investigation.
+- **Our `emu` fps for Ruby** Ã¢â‚¬â€ see Ã‚Â§5. Blocks any core-swap decision from that
+  historical comparison.
+- **Selective `IRAM_ATTR` on the hot interpreter loop** Ã¢â‚¬â€ see Ã‚Â§4. This was an
+  optimization candidate investigated during the earlier performance work.
 
 ## 7b. 2026-08-19 afternoon: the renderer, not the interpreter, is the wall
 
 All measured on Ruby attract mode, cycle counters in CPULoop (BENCH cpu/gfx/
-apu/w_* fields). Corrects §4/§8's assumption that the interpreter dominates:
+apu/w_* fields). Corrects Â§4/Â§8's assumption that the interpreter dominates:
 
 - No frameskip, single core: **14 fps**, split ~35% interpreter / ~63% PPU.
 - The PPU line renderer costs ~72k cycles per line (~310us): tile passes 42%
@@ -279,16 +285,16 @@ Not close, and no longer plausibly reachable on this chip:
 
 - The only real dynarec in reach targets a **different SoC**.
 - The Xtensa dynarec is a helper scaffold and is *slower* than interpreting.
-- Placement tuning is worth maybe +10–15%.
+- Placement tuning is worth maybe +10â€“15%.
 - Frameskip raises *drawn* smoothness but not emulation speed (gpSP's own play
-  mode ships with fixed frameskip 1 — every other frame skipped).
+  mode ships with fixed frameskip 1 â€” every other frame skipped).
 
 Realistic ceiling with everything above applied: **high 20s fps**, from ~18.6
 drawn today.
 
 ## 7c. Interpreter anatomy (2026-08-19 evening, measured with cpi counters)
 
-- **~60% of executed instructions are ARM**, not Thumb. FINDINGS §1's
+- **~60% of executed instructions are ARM**, not Thumb. FINDINGS Â§1's
   "Pokemon is Thumb-heavy" is wrong at runtime: gen-3's m4a sound engine
   mixes audio in ARM code from IWRAM every frame -- on real hardware that
   legitimately eats half the GBA CPU. The emulated workload is authentic.
